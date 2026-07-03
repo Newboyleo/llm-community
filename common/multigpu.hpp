@@ -37,9 +37,17 @@ inline int require_gpus(int want) {
 
 // Enable peer access for every ordered pair (i,j) that supports it. Prints a
 // small table so the reader can see which links are NVLink vs PCIe.
+//
+// Subtlety: cudaDeviceEnablePeerAccess(j, 0) enables access from the *current*
+// device to j — so we must cudaSetDevice(i) first, otherwise every enable is
+// issued from device 0 and mis-targeted pairs fail with PeerAccessUnsupported.
+// cudaDeviceCanAccessPeer is only a hint, so a link can still be rejected by
+// the system; we warn and skip those rather than aborting (the lesson then
+// degrades to the host-memory bounce path).
 inline void enable_all_peers(int n) {
     std::printf("[peers] device topology (%d GPUs):\n", n);
     for (int i = 0; i < n; ++i) {
+        LAB_CUDA(cudaSetDevice(i));
         for (int j = 0; j < n; ++j) {
             if (i == j) continue;
             int can = 0;
@@ -48,7 +56,12 @@ inline void enable_all_peers(int n) {
                 // Enabling is idempotent; ignore "already enabled" errors.
                 cudaError_t e = cudaDeviceEnablePeerAccess(j, 0);
                 if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled) {
-                    LAB_CUDA(e);
+                    if (e == cudaErrorPeerAccessUnsupported) {
+                        std::printf("[peers]  GPU%d -> GPU%d: unsupported, "
+                                    "will use sysmem path\n", i, j);
+                    } else {
+                        LAB_CUDA(e);
+                    }
                 }
             }
         }
