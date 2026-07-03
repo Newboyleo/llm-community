@@ -12,6 +12,7 @@
 // code that is genuinely host-side.
 
 #include <chrono>
+#include <cstdio>
 #include <cuda_runtime.h>
 
 namespace lab {
