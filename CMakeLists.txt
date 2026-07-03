@@ -15,7 +15,7 @@ endif()
 
 # Ask for architecture of the building host. Override with -DCMAKE_CUDA_ARCHITECTURES=...
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES native)
+    set(CMAKE_CUDA_ARCHITECTURES 80)
 endif()
 
 # Common helpers compile into a static lib that every lesson links.
@@ -37,7 +37,6 @@ set(CUDA_LESSONS
     lesson08-alltoall
     lesson09-ring-buffer
     lesson10-streams
-    lesson11-events
 )
 
 foreach(lesson ${CUDA_LESSONS})
