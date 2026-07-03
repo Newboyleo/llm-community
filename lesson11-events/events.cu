@@ -11,8 +11,8 @@
 #include "timing.hpp"
 
 __global__ void busy_kernel(float target_ms) {
-    clock64_t start = clock64();
-    clock64_t need = (clock64_t)(target_ms * 1e6);
+    unsigned long long start = clock64();
+    unsigned long long need = (unsigned long long)(target_ms * 1e6);
     while (clock64() - start < need) { /* spin */ }
 }
 

@@ -12,8 +12,8 @@
 // Spin for roughly `target_ms` milliseconds, measured by the GPU's own clock.
 // One thread, so it uses ~1 SM and leaves room for another kernel to overlap.
 __global__ void busy_kernel(float target_ms) {
-    clock64_t start = clock64();
-    clock64_t ticks_needed = (clock64_t)(target_ms * 1e6);  // ~1 GHz clock -> 1e6 ticks/ms
+    unsigned long long start = clock64();
+    unsigned long long ticks_needed = (unsigned long long)(target_ms * 1e6);  // ~1 GHz clock -> 1e6 ticks/ms
     while (clock64() - start < ticks_needed) { /* spin */ }
 }
 

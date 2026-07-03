@@ -43,7 +43,7 @@ inline void enable_all_peers(int n) {
         for (int j = 0; j < n; ++j) {
             if (i == j) continue;
             int can = 0;
-            LAB_CUDA(cudaDeviceCanAccessPeer(i, j, &can));
+            LAB_CUDA(cudaDeviceCanAccessPeer(&can, i, j));
             if (can) {
                 // Enabling is idempotent; ignore "already enabled" errors.
                 cudaError_t e = cudaDeviceEnablePeerAccess(j, 0);
@@ -68,7 +68,7 @@ inline void print_peer_matrix(int n) {
                 std::printf("  X    ");
             } else {
                 int can = 0;
-                cudaDeviceCanAccessPeer(i, j, &can);
+                cudaDeviceCanAccessPeer(&can, i, j);
                 std::printf("%-7s", can ? "P2P" : "sys");
             }
         }
