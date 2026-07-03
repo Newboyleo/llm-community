@@ -1,0 +1,4 @@
+# Lesson 18 is a reading guide — no buildable code.
+# CMakeLists.txt is intentionally absent. The top-level CMakeLists only adds
+# subdirectories whose CMakeLists.txt exists, so this directory is skipped
+# automatically.

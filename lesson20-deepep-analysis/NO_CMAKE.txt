@@ -1,0 +1,3 @@
+# Lesson 20 is a synthesis writeup — no buildable code.
+# The top-level CMakeLists only adds subdirectories with a CMakeLists.txt, so
+# this directory is skipped automatically.
