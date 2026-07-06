@@ -62,16 +62,28 @@ static float bcast_naive(std::vector<int*>& d, int n, size_t bytes, cudaStream_t
     return t.elapsed_ms();
 }
 
-// --- ring: 0 -> 1 -> 2 -> ... -> n-1, each hop on its own stream -------------
+// --- ring: 0 -> 1 -> 2 -> ... -> n-1 ----------------------------------------
+// Each hop r (d[r] -> d[r+1]) reads what hop r-1 wrote, so the hops carry a
+// real data dependency and must be ordered. We put each hop on its own stream
+// and chain them with events: hop r waits for hop r-1's "ready" event before
+// reading d[r]. (For a single un-chunked buffer this is no faster than a
+// single stream — the ordering is mandatory, not a parallelism win. The win
+// comes in lesson 7 when the payload is split into pipelined chunks.)
 static float bcast_ring(std::vector<int*>& d, int n, size_t bytes,
                         std::vector<cudaStream_t>& streams) {
     lab::GpuTimer t;
     t.start(streams[0]);
+    std::vector<cudaEvent_t> ready(n);
+    for (int r = 0; r < n; ++r)
+        LAB_CUDA(cudaEventCreateWithFlags(&ready[r], cudaEventDisableTiming));
     for (int r = 0; r + 1 < n; ++r) {
+        if (r > 0) LAB_CUDA(cudaStreamWaitEvent(streams[r], ready[r - 1], 0));
         LAB_CUDA(cudaMemcpyPeerAsync(d[r + 1], r + 1, d[r], r, bytes, streams[r]));
+        LAB_CUDA(cudaEventRecord(ready[r], streams[r]));
     }
     for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
     t.stop(streams[0]);
+    for (int r = 0; r < n; ++r) LAB_CUDA(cudaEventDestroy(ready[r]));
     return t.elapsed_ms();
 }
 
@@ -120,6 +132,11 @@ int main(int argc, char** argv) {
             LAB_CUDA(cudaSetDevice(r));
             LAB_CUDA(cudaMemset(d[r], 0, bytes));
         }
+        // GpuTimer events are created on the *current* device's context, so make
+        // it device 0 — every fn below times on streams[0] (a device-0 stream).
+        // Without this, elapsed_ms() silently returns 0.0f (create/record device
+        // mismatch) and bandwidth prints as inf.
+        LAB_CUDA(cudaSetDevice(0));
         float ms = fn(d, n, bytes, streams);
         bool ok = verify_all_match(d, bytes);
         std::printf("\n==== %s ====\nall ranks match src: %s\n", name, ok ? "YES" : "NO");
