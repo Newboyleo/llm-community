@@ -4,6 +4,7 @@
 // Uses only cudaMemcpyPeerAsync (lesson 2's primitive). The lesson is that the
 // *schedule* of peer copies determines latency, not the copies themselves.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -100,6 +101,89 @@ static float bcast_ring(std::vector<int*>& d, int n, size_t bytes,
     return t.elapsed_ms();
 }
 
+// --- chunked ring: the *real* ring algorithm -------------------------------
+// The plain ring above is no better than naive because the whole buffer is one
+// indivisible dependency chain: hop r can't start until hop r-1 fully finishes.
+// The fix is the same one NCCL uses for large messages — split the payload into
+// K chunks and PIPELINE them. Chunk c of hop r depends only on chunk c of hop
+// r-1, so:
+//   - chunk 0 of hop r can start the moment chunk 0 of hop r-1 lands, without
+//     waiting for chunks 1..K-1 of hop r-1;
+//   - meanwhile hop r-1 is forwarding chunk 1, etc.
+// After a fill phase of ~n-1 hops the pipeline is full and every link is busy
+// every cycle, so the β·S term no longer multiplies by n-1: total ≈
+// (n-1)·α + β·S. For large S this approaches bandwidth-optimal (β·S), which is
+// why ring beats tree once the message is big enough.
+//
+// Dependency wiring: for each (hop r, chunk c) we issue, on streams[r],
+//   cudaMemcpyPeerAsync(d[r+1][chunk c], ..., d[r][chunk c], ...)
+// preceded by a cudaStreamWaitEvent on the "ready" event of (hop r-1, chunk c).
+// Each hop keeps its own per-chunk event so chunks don't serialize each other —
+// chunk c+1 of hop r never waits on chunk c of hop r. We use one stream per
+// rank (not per (rank,chunk)); the per-chunk events are what carry the fine-
+// grained ordering across that single stream's serialized work.
+//
+// Device-ownership of events (same rule that bit us in bcast_ring): an event
+// must be created on the device of the stream that RECORDS it. ready[r][c]
+// ("d[r]'s chunk c is ready") is recorded by hop r-1 on streams[r-1] (device
+// r-1), so for r>=1 it lives on device r-1; the seed row r=0 is recorded on
+// streams[0] (device 0). The cudaStreamWaitEvent that consumes it is the
+// *cross*-device wait (device r stream waiting on a device r-1 event) — that
+// part is the intended use of inter-device events and is fine; only the
+// record-side device must match.
+static float bcast_ring_chunked(std::vector<int*>& d, int n, size_t bytes,
+                                std::vector<cudaStream_t>& streams,
+                                size_t n_chunks) {
+    // Chunk count must divide the buffer (in bytes) and the int count, so every
+    // chunk is a whole number of ints and every rank gets the same shape.
+    n_chunks = std::max<size_t>(1, n_chunks);
+    const size_t total_ints = bytes / sizeof(int);
+    const size_t chunk_ints = total_ints / n_chunks;
+    const size_t chunk_bytes = chunk_ints * sizeof(int);
+    if (chunk_ints == 0) return bcast_ring(d, n, bytes, streams);  // tiny buf
+
+    lab::GpuTimer t;
+    t.start(streams[0]);
+
+    // ready[r][c] = "d[r]'s chunk c is ready". See header comment for the device
+    // rule: row r is created on device (r==0 ? 0 : r-1), i.e. the device that
+    // records it. Seed row 0 is pre-recorded on streams[0] (rank 0 already has
+    // every chunk).
+    auto owner = [](int r) { return r == 0 ? 0 : r - 1; };
+    std::vector<std::vector<cudaEvent_t>> ready(n);
+    for (int r = 0; r < n; ++r) ready[r].resize(n_chunks);
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(owner(r)));
+        for (size_t c = 0; c < n_chunks; ++c)
+            LAB_CUDA(cudaEventCreateWithFlags(&ready[r][c], cudaEventDisableTiming));
+    }
+    for (size_t c = 0; c < n_chunks; ++c)
+        LAB_CUDA(cudaEventRecord(ready[0][c], streams[0]));
+
+    for (int r = 0; r + 1 < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        for (size_t c = 0; c < n_chunks; ++c) {
+            // Wait for the source chunk to be ready before reading it. This is
+            // the cross-device wait (device-r stream on a device-owner(r) event).
+            LAB_CUDA(cudaStreamWaitEvent(streams[r], ready[r][c], 0));
+            char* dst = reinterpret_cast<char*>(d[r + 1]) + c * chunk_bytes;
+            char* src = reinterpret_cast<char*>(d[r])     + c * chunk_bytes;
+            LAB_CUDA(cudaMemcpyPeerAsync(dst, r + 1, src, r, chunk_bytes, streams[r]));
+            LAB_CUDA(cudaEventRecord(ready[r + 1][c], streams[r]));
+        }
+    }
+
+    for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    LAB_CUDA(cudaSetDevice(0));  // t's events live on device 0; record stop there
+    t.stop(streams[0]);
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(owner(r)));
+        for (size_t c = 0; c < n_chunks; ++c)
+            LAB_CUDA(cudaEventDestroy(ready[r][c]));
+    }
+    return t.elapsed_ms();
+}
+
 // --- tree: doubling. step s: rank r sends to r | (1<<s) ---------------------
 static float bcast_tree(std::vector<int*>& d, int n, size_t bytes,
                         std::vector<cudaStream_t>& streams) {
@@ -161,6 +245,19 @@ int main(int argc, char** argv) {
     });
     run("ring broadcast",  bcast_ring);
     run("tree broadcast",  bcast_tree);
+
+    // Chunked ring: the real ring algorithm. Sweep a few chunk counts to see
+    // the pipeline fill — more chunks => better link overlap, but diminishing
+    // returns (and event overhead) once chunks are small. For large S this is
+    // where ring overtakes tree; for small S the per-chunk α overhead can make
+    // it worse, which is exactly the small/large crossover NCCL auto-tunes.
+    for (size_t kc : {4, 16, 64}) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "ring chunked x%zu", kc);
+        run(label, [&](auto& d, int n, size_t b, auto& s) {
+            return bcast_ring_chunked(d, n, b, s, kc);
+        });
+    }
 
     free_all(d);
     for (int r = 0; r < n; ++r) {
