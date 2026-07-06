@@ -69,21 +69,34 @@ static float bcast_naive(std::vector<int*>& d, int n, size_t bytes, cudaStream_t
 // reading d[r]. (For a single un-chunked buffer this is no faster than a
 // single stream — the ordering is mandatory, not a parallelism win. The win
 // comes in lesson 7 when the payload is split into pipelined chunks.)
+//
+// Cross-device event rule: an event must be created on the SAME device as the
+// stream that records it, or cudaEventRecord fails with
+// cudaErrorInvalidResourceHandle. So ready[r] is created on device r (matching
+// streams[r]). The cross-device cudaStreamWaitEvent below — making a device-r
+// stream wait on a device-(r-1) event — is exactly the intended use of
+// inter-device events and works fine.
 static float bcast_ring(std::vector<int*>& d, int n, size_t bytes,
                         std::vector<cudaStream_t>& streams) {
     lab::GpuTimer t;
     t.start(streams[0]);
     std::vector<cudaEvent_t> ready(n);
-    for (int r = 0; r < n; ++r)
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaEventCreateWithFlags(&ready[r], cudaEventDisableTiming));
+    }
     for (int r = 0; r + 1 < n; ++r) {
         if (r > 0) LAB_CUDA(cudaStreamWaitEvent(streams[r], ready[r - 1], 0));
         LAB_CUDA(cudaMemcpyPeerAsync(d[r + 1], r + 1, d[r], r, bytes, streams[r]));
         LAB_CUDA(cudaEventRecord(ready[r], streams[r]));
     }
     for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    LAB_CUDA(cudaSetDevice(0));  // t's events live on device 0; record stop there
     t.stop(streams[0]);
-    for (int r = 0; r < n; ++r) LAB_CUDA(cudaEventDestroy(ready[r]));
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        LAB_CUDA(cudaEventDestroy(ready[r]));
+    }
     return t.elapsed_ms();
 }
 
