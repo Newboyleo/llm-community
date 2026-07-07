@@ -117,6 +117,13 @@ int main(int argc, char** argv) {
 
     auto run = [&](const char* name, auto fn) {
         State s = setup(n, slice_ints);
+        // GpuTimer events are created on the *current* device's context, and
+        // ag_naive/ag_ring time on streams[0] (a device-0 stream). setup() ends
+        // with cudaSetDevice(n-1), so without this the timer's start_/stop_
+        // events are created on device n-1 but recorded on device 0's stream —
+        // cudaEventRecord silently fails (it's not LAB_CUDA-wrapped in GpuTimer),
+        // elapsed_ms() returns 0.0f, and bandwidth prints as inf.
+        LAB_CUDA(cudaSetDevice(0));
         float ms = fn(s);
         bool ok = verify(s);
         std::printf("\n==== %s ====\nresult %s\n", name, ok ? "OK" : "MISMATCH");

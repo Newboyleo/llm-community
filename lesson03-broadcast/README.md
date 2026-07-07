@@ -233,3 +233,225 @@ The tree-vs-ring decision NCCL makes here is the same decision DeepEP makes
 when choosing its **normal-latency** (tree-like, few hops) vs **low-latency**
 (ring-buffered, many small parallel transfers) dispatch kernels — see lessons
 17 and 19.
+
+
+你的理解**方向是对的**，但有两个地方需要纠正一下：
+
+1. **不是开了多个 stream 进程**（CUDA Stream 不是进程，也不是线程）
+2. **也不是 CUDA 自己随意调度**，而是**通过 Event 建立了明确的执行依赖关系**，CUDA Runtime 根据这些依赖来安排执行。
+
+---
+
+## 可以理解成下面这个模型
+
+每个 GPU 都有一个 Stream：
+
+```text
+GPU0 : stream0
+GPU1 : stream1
+GPU2 : stream2
+GPU3 : stream3
+```
+
+整个循环实际上是在**提前把所有工作都提交（enqueue）到各个 Stream 中**。
+
+例如对于 4 张 GPU、2 个 chunk：
+
+GPU0 的 stream：
+
+```text
+Wait ready[0][0]
+Memcpy chunk0 -> GPU1
+Record ready[1][0]
+
+Wait ready[0][1]
+Memcpy chunk1 -> GPU1
+Record ready[1][1]
+```
+
+GPU1 的 stream：
+
+```text
+Wait ready[1][0]
+Memcpy chunk0 -> GPU2
+Record ready[2][0]
+
+Wait ready[1][1]
+Memcpy chunk1 -> GPU2
+Record ready[2][1]
+```
+
+GPU2 的 stream：
+
+```text
+Wait ready[2][0]
+Memcpy chunk0 -> GPU3
+Record ready[3][0]
+
+Wait ready[2][1]
+Memcpy chunk1 -> GPU3
+Record ready[3][1]
+```
+
+注意：
+
+CPU 很快就把这些命令全部提交完了，并不会等待。
+
+---
+
+## Event 就像"红绿灯"
+
+例如：
+
+```cpp
+cudaStreamWaitEvent(streams[1], ready[1][0], 0);
+```
+
+表示：
+
+> GPU1 的 stream 执行到这里时，如果 `ready[1][0]` 没完成，就停在这里。
+
+什么时候继续？
+
+就是：
+
+```cpp
+cudaEventRecord(ready[1][0], streams[0]);
+```
+
+真正执行完成之后。
+
+于是：
+
+```text
+GPU0 stream
+
+Memcpy chunk0
+↓
+
+Record ready[1][0]
+          │
+          ▼
+GPU1 stream 被唤醒
+↓
+
+Memcpy chunk0
+↓
+
+Record ready[2][0]
+          │
+          ▼
+GPU2 stream 被唤醒
+```
+
+整个过程都是 GPU 自己完成同步，不需要 CPU 再参与。
+
+---
+
+## 为什么效率高？
+
+如果没有 Event：
+
+```text
+CPU：
+
+GPU0->GPU1
+
+等待
+
+GPU1->GPU2
+
+等待
+
+GPU2->GPU3
+```
+
+CPU 必须不断同步。
+
+而现在：
+
+CPU 一次性提交：
+
+```text
+GPU0 stream
+GPU1 stream
+GPU2 stream
+```
+
+全部命令。
+
+然后：
+
+```text
+GPU 自己等 Event
+
+GPU 自己开始下一步
+
+GPU 自己通知下一张卡
+```
+
+CPU 基本可以退出了，只在最后：
+
+```cpp
+cudaStreamSynchronize(...)
+```
+
+等待全部结束。
+
+---
+
+## 更准确地说，这段代码实现的是一个**数据流图（DAG）**
+
+可以画成这样：
+
+```text
+GPU0
+Chunk0 Copy
+     │
+     ▼
+ready[1][0]
+     │
+     ▼
+GPU1
+Chunk0 Copy
+     │
+     ▼
+ready[2][0]
+     │
+     ▼
+GPU2
+Chunk0 Copy
+```
+
+Chunk1 又是另一条链：
+
+```text
+GPU0
+Chunk1 Copy
+     │
+     ▼
+ready[1][1]
+     │
+     ▼
+GPU1
+Chunk1 Copy
+```
+
+所以实际上存在很多条这样的依赖链：
+
+```text
+Chunk0：GPU0 → GPU1 → GPU2 → GPU3
+Chunk1：GPU0 → GPU1 → GPU2 → GPU3
+Chunk2：GPU0 → GPU1 → GPU2 → GPU3
+...
+```
+
+CUDA Runtime 根据这些 Event 自动调度，只要某个 Event 满足，它后面的操作立即开始执行。
+
+---
+
+### 一句话总结
+
+你的理解可以修正为：
+
+> **这段代码不是开启多个“进程”，而是为每个 GPU 准备了一个 Stream，并一次性把所有 chunk 的复制任务都提交到这些 Stream 中。`cudaEventRecord` 和 `cudaStreamWaitEvent` 为不同 GPU、不同 chunk 建立了依赖关系。之后 CUDA Runtime 根据这些 Event 自动唤醒后续操作，实现了跨 GPU 的流水线（pipeline）执行，而 CPU 无需逐步介入调度。**

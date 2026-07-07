@@ -88,6 +88,13 @@ int main(int argc, char** argv) {
                 n * block * sizeof(int) / (1024.0 * 1024.0));
 
     State s = setup(n, block);
+    // GpuTimer events are created on the *current* device's context, and
+    // a2a_naive times on streams[0] (a device-0 stream). setup() ends with
+    // cudaSetDevice(n-1), so without this the timer's events are created on
+    // device n-1 but recorded on device 0's stream — cudaEventRecord silently
+    // fails (GpuTimer doesn't LAB_CUDA-wrap it), elapsed_ms() returns 0.0f,
+    // and bandwidth prints as inf.
+    LAB_CUDA(cudaSetDevice(0));
     // show "before" tags on rank 0
     {
         std::vector<int> host(n);
