@@ -47,6 +47,7 @@ static bool verify(State& s) {
     // after: rank j slot i == 10000*i + j
     for (int r = 0; r < s.n; ++r) {
         std::vector<int> host(s.n * s.block);
+        LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(host.data(), s.d[r], host.size() * sizeof(int),
                             cudaMemcpyDeviceToHost));
         for (int i = 0; i < s.n; ++i)
@@ -59,18 +60,24 @@ static bool verify(State& s) {
 static float a2a_naive(State& s) {
     int n = s.n, block = s.block;
     size_t bb = block * sizeof(int);
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s.streams[0]);
     for (int src = 0; src < n; ++src) {
         for (int dst = 0; dst < n; ++dst) {
             if (src == dst) continue;  // self-block stays in place
             // rank src sends its slot[dst] to rank dst's slot[src]
+            LAB_CUDA(cudaSetDevice(src));
             LAB_CUDA(cudaMemcpyPeerAsync(s.d[dst] + src * block, dst,
                                          s.d[src] + dst * block, src,
                                          bb, s.streams[src]));
         }
     }
-    for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+    }
+    LAB_CUDA(cudaSetDevice(0));
     t.stop(s.streams[0]);
     return t.elapsed_ms();
 }
@@ -88,12 +95,7 @@ int main(int argc, char** argv) {
                 n * block * sizeof(int) / (1024.0 * 1024.0));
 
     State s = setup(n, block);
-    // GpuTimer events are created on the *current* device's context, and
-    // a2a_naive times on streams[0] (a device-0 stream). setup() ends with
-    // cudaSetDevice(n-1), so without this the timer's events are created on
-    // device n-1 but recorded on device 0's stream — cudaEventRecord silently
-    // fails (GpuTimer doesn't LAB_CUDA-wrap it), elapsed_ms() returns 0.0f,
-    // and bandwidth prints as inf.
+    // a2a_naive times on streams[0], a device-0 stream.
     LAB_CUDA(cudaSetDevice(0));
     // show "before" tags on rank 0
     {
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
     std::printf("\n==== naive alltoall ====\nresult %s\n", ok ? "OK" : "MISMATCH");
     {
         std::vector<int> host(n);
+        LAB_CUDA(cudaSetDevice(0));
         LAB_CUDA(cudaMemcpy(host.data(), s.d[0], n * sizeof(int), cudaMemcpyDeviceToHost));
         lab::print_host("after  r0 tags", host.data(), n, n);
     }

@@ -52,6 +52,7 @@ static void teardown(State& s) {
 static bool verify(const State& s) {
     // rank 0's buffer should be [s0, s1, ..., s_{n-1}] = [0,1,.. ; 1000,1001,.. ; ...]
     std::vector<int> host(s.n * s.slice_ints);
+    LAB_CUDA(cudaSetDevice(0));
     LAB_CUDA(cudaMemcpy(host.data(), s.d[0], host.size() * sizeof(int),
                         cudaMemcpyDeviceToHost));
     for (int k = 0; k < s.n; ++k) {
@@ -63,9 +64,10 @@ static bool verify(const State& s) {
     return true;
 }
 
-// naive: each src sends its own slice to every other dst.
+// naive: each src sends its own slice to every other dst. [s0, s1, ..., s_{n-1}]
 static float ag_naive(State& s) {
     size_t sb = s.slice_ints * sizeof(int);
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s.streams[0]);
     for (int src = 0; src < s.n; ++src) {
@@ -86,6 +88,7 @@ static float ag_naive(State& s) {
 static float ag_ring(State& s) {
     int n = s.n;
     size_t sb = s.slice_ints * sizeof(int);
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s.streams[0]);
     for (int step = 0; step < n - 1; ++step) {
@@ -93,12 +96,17 @@ static float ag_ring(State& s) {
             int next = (r + 1) % n;
             // slice I'm forwarding this step = my own slice, shifted by step+1
             int fwd_slice = (r - step + n) % n;
+            LAB_CUDA(cudaSetDevice(r));
             LAB_CUDA(cudaMemcpyPeerAsync(s.d[next] + fwd_slice * s.slice_ints, next,
                                          s.d[r]     + fwd_slice * s.slice_ints, r,
                                          sb, s.streams[r]));
         }
-        for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        for (int r = 0; r < n; ++r) {
+            LAB_CUDA(cudaSetDevice(r));
+            LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        }
     }
+    LAB_CUDA(cudaSetDevice(0));
     t.stop(s.streams[0]);
     return t.elapsed_ms();
 }
@@ -117,12 +125,7 @@ int main(int argc, char** argv) {
 
     auto run = [&](const char* name, auto fn) {
         State s = setup(n, slice_ints);
-        // GpuTimer events are created on the *current* device's context, and
-        // ag_naive/ag_ring time on streams[0] (a device-0 stream). setup() ends
-        // with cudaSetDevice(n-1), so without this the timer's start_/stop_
-        // events are created on device n-1 but recorded on device 0's stream —
-        // cudaEventRecord silently fails (it's not LAB_CUDA-wrapped in GpuTimer),
-        // elapsed_ms() returns 0.0f, and bandwidth prints as inf.
+        // ag_naive/ag_ring time on streams[0], a device-0 stream.
         LAB_CUDA(cudaSetDevice(0));
         float ms = fn(s);
         bool ok = verify(s);

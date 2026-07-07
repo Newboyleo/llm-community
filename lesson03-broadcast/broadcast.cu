@@ -25,6 +25,7 @@ static std::vector<int*> alloc_all(int n, size_t bytes) {
     // Fill rank 0 with a recognizable pattern.
     std::vector<int> tmp(bytes / sizeof(int));
     for (size_t i = 0; i < tmp.size(); ++i) tmp[i] = static_cast<int>(i + 1);
+    LAB_CUDA(cudaSetDevice(0));
     LAB_CUDA(cudaMemcpy(d[0], tmp.data(), bytes, cudaMemcpyHostToDevice));
     return d;
 }
@@ -42,9 +43,11 @@ static void free_all(std::vector<int*>& d) {
 static bool verify_all_match(const std::vector<int*>& d, size_t bytes) {
     int n = static_cast<int>(d.size());
     std::vector<int> ref(bytes / sizeof(int));
+    LAB_CUDA(cudaSetDevice(0));
     LAB_CUDA(cudaMemcpy(ref.data(), d[0], bytes, cudaMemcpyDeviceToHost));
     for (int r = 1; r < n; ++r) {
         std::vector<int> got(bytes / sizeof(int));
+        LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(got.data(), d[r], bytes, cudaMemcpyDeviceToHost));
         if (got != ref) return false;
     }
@@ -53,6 +56,7 @@ static bool verify_all_match(const std::vector<int*>& d, size_t bytes) {
 
 // --- naive: rank 0 sends to each rank serially on one stream ----------------
 static float bcast_naive(std::vector<int*>& d, int n, size_t bytes, cudaStream_t s) {
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s);
     for (int dst = 1; dst < n; ++dst) {
@@ -79,6 +83,7 @@ static float bcast_naive(std::vector<int*>& d, int n, size_t bytes, cudaStream_t
 // inter-device events and works fine.
 static float bcast_ring(std::vector<int*>& d, int n, size_t bytes,
                         std::vector<cudaStream_t>& streams) {
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(streams[0]);
     std::vector<cudaEvent_t> ready(n);
@@ -87,11 +92,15 @@ static float bcast_ring(std::vector<int*>& d, int n, size_t bytes,
         LAB_CUDA(cudaEventCreateWithFlags(&ready[r], cudaEventDisableTiming));
     }
     for (int r = 0; r + 1 < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
         if (r > 0) LAB_CUDA(cudaStreamWaitEvent(streams[r], ready[r - 1], 0));
         LAB_CUDA(cudaMemcpyPeerAsync(d[r + 1], r + 1, d[r], r, bytes, streams[r]));
         LAB_CUDA(cudaEventRecord(ready[r], streams[r]));
     }
-    for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    }
     LAB_CUDA(cudaSetDevice(0));  // t's events live on device 0; record stop there
     t.stop(streams[0]);
     for (int r = 0; r < n; ++r) {
@@ -142,6 +151,7 @@ static float bcast_ring_chunked(std::vector<int*>& d, int n, size_t bytes,
     const size_t chunk_bytes = chunk_ints * sizeof(int);
     if (chunk_ints == 0) return bcast_ring(d, n, bytes, streams);  // tiny buf
 
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(streams[0]);
 
@@ -157,6 +167,7 @@ static float bcast_ring_chunked(std::vector<int*>& d, int n, size_t bytes,
         for (size_t c = 0; c < n_chunks; ++c)
             LAB_CUDA(cudaEventCreateWithFlags(&ready[r][c], cudaEventDisableTiming));
     }
+    LAB_CUDA(cudaSetDevice(0));
     for (size_t c = 0; c < n_chunks; ++c)
         LAB_CUDA(cudaEventRecord(ready[0][c], streams[0]));
 
@@ -173,7 +184,10 @@ static float bcast_ring_chunked(std::vector<int*>& d, int n, size_t bytes,
         }
     }
 
-    for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    }
     LAB_CUDA(cudaSetDevice(0));  // t's events live on device 0; record stop there
     t.stop(streams[0]);
     for (int r = 0; r < n; ++r) {
@@ -187,18 +201,24 @@ static float bcast_ring_chunked(std::vector<int*>& d, int n, size_t bytes,
 // --- tree: doubling. step s: rank r sends to r | (1<<s) ---------------------
 static float bcast_tree(std::vector<int*>& d, int n, size_t bytes,
                         std::vector<cudaStream_t>& streams) {
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(streams[0]);
     for (int step = 0; (1 << step) < n; ++step) {
         for (int r = 0; r < n; ++r) {
             int partner = r | (1 << step);
             if (r < partner && partner < n) {
+                LAB_CUDA(cudaSetDevice(r));
                 LAB_CUDA(cudaMemcpyPeerAsync(d[partner], partner, d[r], r, bytes,
                                              streams[r]));
             }
         }
-        for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+        for (int r = 0; r < n; ++r) {
+            LAB_CUDA(cudaSetDevice(r));
+            LAB_CUDA(cudaStreamSynchronize(streams[r]));
+        }
     }
+    LAB_CUDA(cudaSetDevice(0));
     t.stop(streams[0]);
     return t.elapsed_ms();
 }
@@ -229,10 +249,7 @@ int main(int argc, char** argv) {
             LAB_CUDA(cudaSetDevice(r));
             LAB_CUDA(cudaMemset(d[r], 0, bytes));
         }
-        // GpuTimer events are created on the *current* device's context, so make
-        // it device 0 — every fn below times on streams[0] (a device-0 stream).
-        // Without this, elapsed_ms() silently returns 0.0f (create/record device
-        // mismatch) and bandwidth prints as inf.
+        // Every fn below times on streams[0], a device-0 stream.
         LAB_CUDA(cudaSetDevice(0));
         float ms = fn(d, n, bytes, streams);
         bool ok = verify_all_match(d, bytes);

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "checks.hpp"
+
 namespace lab {
 
 // Print up to `n` elements of a host buffer with a label.
@@ -29,7 +31,7 @@ void print_host(const char* label, const T* h, size_t n, size_t max_show = 16) {
 template <typename T>
 std::vector<T> to_host(const T* d, size_t n) {
     std::vector<T> h(n);
-    if (n) cudaMemcpy(h.data(), d, n * sizeof(T), cudaMemcpyDeviceToHost);
+    if (n) LAB_CUDA(cudaMemcpy(h.data(), d, n * sizeof(T), cudaMemcpyDeviceToHost));
     return h;
 }
 

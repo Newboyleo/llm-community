@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
     int* out   = (int*)nvshmem_malloc(count * sizeof(int));
     LAB_CUDA(cudaMemset(head, 0, sizeof(int)));
     LAB_CUDA(cudaMemset(tail, 0, sizeof(int)));
+    nvshmem_barrier_all();
 
     SymmRing r{slots, head, tail, cap};
 

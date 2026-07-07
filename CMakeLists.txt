@@ -25,7 +25,7 @@ add_subdirectory(common)
 # dependency (e.g. NVSHMEM) does not break the rest of the build.
 option(BUILD_ALL_LESSONS "Build every lesson" ON)
 
-# --- CUDA-only lessons (1-11) ------------------------------------------------
+# --- CUDA-only lessons -------------------------------------------------------
 set(CUDA_LESSONS
     lesson01-gpu-copy
     lesson02-peer-copy
@@ -37,6 +37,9 @@ set(CUDA_LESSONS
     lesson08-alltoall
     lesson09-ring-buffer
     lesson10-streams
+    lesson11-events
+    lesson15-token-routing
+    lesson16-moe-dispatch
 )
 
 foreach(lesson ${CUDA_LESSONS})
@@ -45,7 +48,7 @@ foreach(lesson ${CUDA_LESSONS})
     endif()
 endforeach()
 
-# --- NVSHMEM lessons (12-17) -------------------------------------------------
+# --- NVSHMEM lessons ---------------------------------------------------------
 # These require NVSHMEM. Gate behind a find to avoid breaking the CUDA-only build.
 option(BUILD_NVSHMEM_LESSONS "Build NVSHMEM lessons" OFF)
 if(BUILD_NVSHMEM_LESSONS)
@@ -60,9 +63,8 @@ if(BUILD_NVSHMEM_LESSONS)
             lesson12-nvshmem-basics
             lesson13-nvshmem-ring-buffer
             lesson14-producer-consumer
-            lesson15-token-routing
-            lesson16-moe-dispatch
             lesson17-mini-deepep
+            lesson19-optimizing
         )
         foreach(lesson ${NVSHMEM_LESSONS})
             if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${lesson}/CMakeLists.txt")
@@ -72,8 +74,8 @@ if(BUILD_NVSHMEM_LESSONS)
     endif()
 endif()
 
-# --- Documentation-only lessons (18-20) --------------------------------------
-# These have no buildable code; they are reading/analysis guides.
+# --- Documentation-only lessons ---------------------------------------------
+# Lessons 18 and 20 have no buildable code; they are reading/analysis guides.
 
 message(STATUS "llm-communication-lab configured.")
 message(STATUS "  Build type:       ${CMAKE_BUILD_TYPE}")

@@ -23,6 +23,24 @@ struct Opt {
 // Minimal dispatch kernel: each block (ch, dst) puts `batch` tokens via either
 // D float_puts (baseline) or one putmem (rung 2), then a single quiet (rung 1).
 template <int D>
+__device__ void flush_batch(float* recvbuf, float* smem, const int* slots,
+                            int collected, bool use_putmem, int dst) {
+    for (int b = 0; b < collected; ++b) {
+        size_t slot = (size_t)slots[b];
+        if (use_putmem) {
+            nvshmem_putmem(&recvbuf[slot * D], &smem[(size_t)b * D],
+                           (size_t)D * sizeof(float), dst);
+        } else {
+            for (int d = 0; d < D; ++d) {
+                float v = smem[(size_t)b * D + d];
+                nvshmem_float_put(&recvbuf[slot * D + d], &v, 1, dst);
+            }
+        }
+    }
+    nvshmem_quiet();  // rung 1: ONE quiet per batch
+}
+
+template <int D>
 __global__ void dispatch_kernel(const float* __restrict__ tokens,
                                 const int* __restrict__ assign,
                                 float* __restrict__ recvbuf,
@@ -32,51 +50,33 @@ __global__ void dispatch_kernel(const float* __restrict__ tokens,
     int ch = blockIdx.x, dst = blockIdx.y;
     if (ch >= nch || dst >= n) return;
     int experts_per_gpu = E / n;
-    int tid = threadIdx.x;
+    if (threadIdx.x != 0) return;
     int local_idx = 0;
     extern __shared__ float smem[];
+    int* slot_smem = reinterpret_cast<int*>(smem + (size_t)batch * D);
     int collected = 0;
 
-    for (int t = tid; t < Tlocal; t += blockDim.x) {
+    for (int t = 0; t < Tlocal; ++t) {
         int e = assign[t];
         if (e / experts_per_gpu != dst) continue;
         if (local_idx % nch != ch) { ++local_idx; continue; }
         // stash into shared mem (batching)
         for (int d = 0; d < D; ++d)
-            smem[(size_t)collected * D + d] = (d == 0) ? (float)e : tokens[t * D + d];
+            smem[(size_t)collected * D + d] = (d == 0) ? (float)(e + 1) : tokens[t * D + d];
+        slot_smem[collected] = src_pe * Tlocal + local_idx;
         ++collected;
         ++local_idx;
         if (collected == batch) {
-            size_t slot = (size_t)src_pe * Tlocal + (local_idx - batch);
-            if (use_putmem) {
-                nvshmem_putmem(&recvbuf[slot * D], smem, (size_t)batch * D * sizeof(float), dst);
-            } else {
-                for (int b = 0; b < batch; ++b)
-                    for (int d = 0; d < D; ++d) {
-                        float v = smem[(size_t)b * D + d];
-                        nvshmem_float_put(&recvbuf[(slot + b) * D + d], &v, 1, dst);
-                    }
-            }
-            nvshmem_quiet();  // rung 1: ONE quiet per batch
+            flush_batch<D>(recvbuf, smem, slot_smem, collected, use_putmem, dst);
             collected = 0;
         }
     }
     // flush remainder
     if (collected > 0) {
-        size_t slot = (size_t)src_pe * Tlocal + (local_idx - collected);
-        if (use_putmem) {
-            nvshmem_putmem(&recvbuf[slot * D], smem, (size_t)collected * D * sizeof(float), dst);
-        } else {
-            for (int b = 0; b < collected; ++b)
-                for (int d = 0; d < D; ++d) {
-                    float v = smem[(size_t)b * D + d];
-                    nvshmem_float_put(&recvbuf[(slot + b) * D + d], &v, 1, dst);
-                }
-        }
-        nvshmem_quiet();
+        flush_batch<D>(recvbuf, smem, slot_smem, collected, use_putmem, dst);
     }
     int seq = 1;
-    nvshmem_int_put(&ready[ch * n + dst], &seq, 1, dst);
+    nvshmem_int_put(&ready[ch * n + src_pe], &seq, 1, dst);
     nvshmem_quiet();
 }
 
@@ -98,6 +98,13 @@ int main(int argc, char** argv) {
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
+    if (E % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "E must be divisible by n\n"); nvshmem_finalize(); return 1; }
+    if (T % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "T must be divisible by n\n"); nvshmem_finalize(); return 1; }
+    if (D != 64 && D != 128 && D != 256) {
+        if (nvshmem_my_pe() == 0) std::fprintf(stderr, "D must be one of 64, 128, 256\n");
+        nvshmem_finalize();
+        return 1;
+    }
     int pe = nvshmem_my_pe();
     int Tlocal = T / n;
 
@@ -115,23 +122,29 @@ int main(int argc, char** argv) {
     for(int i=0;i<D*E;++i) hw[i]=(float)((i*214013+2531011)&0xff)/256.f-0.5f;
     LAB_CUDA(cudaMemcpy(tokens,ht.data(),ht.size()*sizeof(float),cudaMemcpyHostToDevice));
     LAB_CUDA(cudaMemcpy(W,hw.data(),hw.size()*sizeof(float),cudaMemcpyHostToDevice));
+    nvshmem_barrier_all();
 
     // routing (same for all configs)
     gate_kernel<<<Tlocal,E>>>(tokens,W,L,Tlocal,E,D);
     top1_kernel<<<(Tlocal+255)/256,256>>>(L,assign,Tlocal,E);
     LAB_CUDA_SYNC();
+    nvshmem_barrier_all();
 
     auto run = [&](const char* name, Opt o) {
         LAB_CUDA(cudaMemset(recvbuf,0,(size_t)n*Tlocal*D*sizeof(float)));
         LAB_CUDA(cudaMemset(ready,0,(size_t)o.channels*n*sizeof(int)));
+        nvshmem_barrier_all();
         cudaStream_t s; LAB_CUDA(cudaStreamCreate(&s));
         dim3 grid(o.channels, n);
-        size_t smem = (size_t)o.batch * D * sizeof(float);
+        size_t smem = (size_t)o.batch * D * sizeof(float) + (size_t)o.batch * sizeof(int);
         lab::GpuTimer t; t.start(s);
         if (D==256) dispatch_kernel<256><<<grid,64,smem,s>>>(tokens,assign,recvbuf,ready,Tlocal,n,E,o.channels,o.batch,o.putmem,pe);
+        else if (D==128) dispatch_kernel<128><<<grid,64,smem,s>>>(tokens,assign,recvbuf,ready,Tlocal,n,E,o.channels,o.batch,o.putmem,pe);
+        else dispatch_kernel<64><<<grid,64,smem,s>>>(tokens,assign,recvbuf,ready,Tlocal,n,E,o.channels,o.batch,o.putmem,pe);
         LAB_CUDA_SYNC();
         t.stop(s);
         float ms = t.elapsed_ms();
+        nvshmem_barrier_all();
         double bytes = (double)T * D * sizeof(float);
         if (pe == 0)
             std::printf("%-32s  %7.3f ms  %6.0f GB/s\n", name, ms,

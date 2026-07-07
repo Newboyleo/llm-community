@@ -54,6 +54,7 @@ static bool verify(State& s) {
     int expect = 0;
     for (int r = 0; r < s.n; ++r) expect += r;
     std::vector<int> host(s.L);
+    LAB_CUDA(cudaSetDevice(0));
     LAB_CUDA(cudaMemcpy(host.data(), s.d[0], s.L * sizeof(int), cudaMemcpyDeviceToHost));
     for (int i = 0; i < s.L; ++i) if (host[i] != expect) return false;
     return true;
@@ -62,6 +63,7 @@ static bool verify(State& s) {
 // naive: copy each r>0 into rank0's scratch, add_into rank0's buffer.
 static float reduce_naive(State& s) {
     size_t bytes = s.L * sizeof(int);
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s.streams[0]);
     for (int r = 1; r < s.n; ++r) {
@@ -78,6 +80,7 @@ static float reduce_naive(State& s) {
 static float reduce_tree(State& s) {
     size_t bytes = s.L * sizeof(int);
     int n = s.n;
+    LAB_CUDA(cudaSetDevice(0));
     lab::GpuTimer t;
     t.start(s.streams[0]);
     for (int step = 0; (1 << step) < n; ++step) {
@@ -85,18 +88,27 @@ static float reduce_tree(State& s) {
             int partner = r ^ (1 << step);
             if (partner >= n) continue;
             if (r > partner) {  // sender
+                LAB_CUDA(cudaSetDevice(r));
                 LAB_CUDA(cudaMemcpyPeerAsync(s.scratch[partner], partner, s.d[r], r,
                                              bytes, s.streams[r]));
             }
         }
-        for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        for (int r = 0; r < n; ++r) {
+            LAB_CUDA(cudaSetDevice(r));
+            LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        }
         for (int r = 0; r < n; ++r) {
             int partner = r ^ (1 << step);
             if (partner >= n || r > partner) continue;  // receiver r < partner
+            LAB_CUDA(cudaSetDevice(r));
             add_into<<<(s.L + 255) / 256, 256, 0, s.streams[r]>>>(s.d[r], s.scratch[r], s.L);
         }
-        for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        for (int r = 0; r < n; ++r) {
+            LAB_CUDA(cudaSetDevice(r));
+            LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
+        }
     }
+    LAB_CUDA(cudaSetDevice(0));
     t.stop(s.streams[0]);
     return t.elapsed_ms();
 }
@@ -116,12 +128,7 @@ int main(int argc, char** argv) {
 
     auto run = [&](const char* name, auto fn) {
         State s = setup(n, L);
-        // GpuTimer events are created on the *current* device's context, and
-        // reduce_naive/reduce_tree time on streams[0] (a device-0 stream).
-        // setup() ends with cudaSetDevice(n-1), so without this the timer's
-        // events are created on device n-1 but recorded on device 0's stream —
-        // cudaEventRecord silently fails (GpuTimer doesn't LAB_CUDA-wrap it),
-        // elapsed_ms() returns 0.0f, and bandwidth prints as inf.
+        // reduce_naive/reduce_tree time on streams[0], a device-0 stream.
         LAB_CUDA(cudaSetDevice(0));
         float ms = fn(s);
         bool ok = verify(s);

@@ -58,25 +58,24 @@ __global__ void dispatch_kernel(const float* __restrict__ tokens,
     if (ch >= nch || dst >= n) return;
 
     int experts_per_gpu = E / n;
-    int tid = threadIdx.x;
+    if (threadIdx.x != 0) return;
     int local_idx = 0;  // running count of tokens for dst seen by this block
 
-    for (int t = tid; t < Tlocal; t += blockDim.x) {
+    for (int t = 0; t < Tlocal; ++t) {
         int e = assign[t];
         if (e / experts_per_gpu != dst) continue;
         if (local_idx % nch != ch) { ++local_idx; continue; }
         // slot in dst's recvbuf: this src's region starts at src_pe*Tlocal
         size_t slot = (size_t)src_pe * Tlocal + local_idx;
         for (int d = 0; d < D; ++d) {
-            float v = (d == 0) ? (float)e : tokens[t * D + d];
+            float v = (d == 0) ? (float)(e + 1) : tokens[t * D + d];
             nvshmem_float_put(&recvbuf[slot * D + d], &v, 1, dst);
         }
         ++local_idx;
     }
-    __syncthreads();
     nvshmem_quiet();  // data must land before the flag
     int seq = 1;
-    nvshmem_int_put(&ready[ch * n + dst], &seq, 1, dst);
+    nvshmem_int_put(&ready[ch * n + src_pe], &seq, 1, dst);
     nvshmem_quiet();
 }
 
@@ -101,6 +100,13 @@ int main(int argc, char** argv) {
     if (argc > 3) D = std::atoi(argv[3]);
     if (argc > 4) nch = std::atoi(argv[4]);
     if (E % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "E must be divisible by n\n"); nvshmem_finalize(); return 1; }
+    if (T % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "T must be divisible by n\n"); nvshmem_finalize(); return 1; }
+    if (D != 64 && D != 128 && D != 256) {
+        if (nvshmem_my_pe() == 0) std::fprintf(stderr, "D must be one of 64, 128, 256\n");
+        nvshmem_finalize();
+        return 1;
+    }
+    if (nch <= 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "channels must be > 0\n"); nvshmem_finalize(); return 1; }
     int pe = nvshmem_my_pe();
     int Tlocal = T / n;
 
@@ -130,12 +136,14 @@ int main(int argc, char** argv) {
         LAB_CUDA(cudaMemset(ready, 0, (size_t)nch * n * sizeof(int)));
         LAB_CUDA(cudaMemset(arrived, 0, sizeof(int)));
     }
+    nvshmem_barrier_all();
 
     // routing
     gate_kernel<<<Tlocal, E>>>(tokens, W, logits, Tlocal, E, D);
     top1_kernel<<<(Tlocal + 255) / 256, 256>>>(logits, assign, Tlocal, E);
     count_local_kernel<<<(Tlocal + 255) / 256, 256>>>(assign, count_row, Tlocal, n, E);
     LAB_CUDA_SYNC();
+    nvshmem_barrier_all();
 
     // gather the global count matrix via one-sided gets (naive AllReduce-sum, host-side)
     std::vector<int> global(n * n, 0);
@@ -159,7 +167,7 @@ int main(int argc, char** argv) {
     dim3 grid(nch, n);
     if (D == 256)      dispatch_kernel<256><<<grid, 64, 0, s>>>(tokens, assign, recvbuf, ready, Tlocal, n, E, nch, pe);
     else if (D == 128) dispatch_kernel<128><<<grid, 64, 0, s>>>(tokens, assign, recvbuf, ready, Tlocal, n, E, nch, pe);
-    else               dispatch_kernel<64> <<<<grid, 64, 0, s>>>(tokens, assign, recvbuf, ready, Tlocal, n, E, nch, pe);
+    else               dispatch_kernel<64><<<grid, 64, 0, s>>>(tokens, assign, recvbuf, ready, Tlocal, n, E, nch, pe);
     LAB_CUDA_SYNC();
 
     // consume: poll all (channel, src) flags for this PE
@@ -178,11 +186,12 @@ int main(int argc, char** argv) {
         for (int i = 0; i < Tlocal; ++i) {
             float e_f = host[((size_t)s * Tlocal + i) * D];
             if (e_f == 0.f) continue;  // empty slot (no token from src s here)
-            int e = (int)e_f;
+            int e = (int)e_f - 1;
             if (e / experts_per_gpu != pe) { ok = false; break; }
             ++seen;
         }
     }
+    if (seen != total_incoming) ok = false;
     std::printf("PE%d: %d tokens arrived, all map here: %s\n", pe, seen, ok ? "YES" : "NO");
 
     LAB_CUDA(cudaStreamDestroy(s));

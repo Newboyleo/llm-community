@@ -20,8 +20,6 @@
 // naive bounce path.
 static float bench_one(int dev_src, int dev_dst, size_t bytes, bool through_host,
                        const char* label) {
-    int n = static_cast<int>(bytes / sizeof(int));
-
     // Allocate source on dev_src, dest on dev_dst.
     int* d_src = nullptr;
     int* d_dst = nullptr;
@@ -36,22 +34,30 @@ static float bench_one(int dev_src, int dev_dst, size_t bytes, bool through_host
     int* h_stage = nullptr;
     LAB_CUDA(cudaMallocHost(&h_stage, bytes));
 
-    lab::GpuTimer t;
+    float ms = 0.0f;
     if (through_host) {
+        // This path spans two devices plus host staging, so CPU wall-clock is
+        // the honest end-to-end measurement.
+        lab::CpuTimer t;
         t.start();
         LAB_CUDA(cudaSetDevice(dev_src));
         LAB_CUDA(cudaMemcpy(h_stage, d_src, bytes, cudaMemcpyDeviceToHost));
         LAB_CUDA(cudaSetDevice(dev_dst));
         LAB_CUDA(cudaMemcpy(d_dst, h_stage, bytes, cudaMemcpyHostToDevice));
-        t.stop();
+        ms = static_cast<float>(t.elapsed_ms());
     } else {
         // Peer path. Make sure peer access is enabled both directions.
         lab::enable_all_peers(2);
-        t.start();
-        LAB_CUDA(cudaMemcpyPeer(d_dst, dev_dst, d_src, dev_src, bytes));
-        t.stop();
+        LAB_CUDA(cudaSetDevice(dev_dst));
+        cudaStream_t s;
+        LAB_CUDA(cudaStreamCreate(&s));
+        lab::GpuTimer t;
+        t.start(s);
+        LAB_CUDA(cudaMemcpyPeerAsync(d_dst, dev_dst, d_src, dev_src, bytes, s));
+        t.stop(s);
+        ms = t.elapsed_ms();
+        LAB_CUDA(cudaStreamDestroy(s));
     }
-    float ms = t.elapsed_ms();
     lab::print_bandwidth(label, bytes, ms);
 
     LAB_CUDA(cudaSetDevice(dev_src));
@@ -74,12 +80,16 @@ static float bench_uva(int dev_src, int dev_dst, size_t bytes, const char* label
     LAB_CUDA(cudaMalloc(&d_dst, bytes));
 
     lab::enable_all_peers(2);
+    LAB_CUDA(cudaSetDevice(dev_dst));
+    cudaStream_t s;
+    LAB_CUDA(cudaStreamCreate(&s));
     lab::GpuTimer t;
-    t.start();
-    // Current device doesn't matter for the pointer; the runtime figures it out.
-    LAB_CUDA(cudaMemcpy(d_dst, d_src, bytes, cudaMemcpyDeviceToDevice));
-    t.stop();
+    t.start(s);
+    // The pointers carry device identity; the stream supplies the ordering.
+    LAB_CUDA(cudaMemcpyAsync(d_dst, d_src, bytes, cudaMemcpyDeviceToDevice, s));
+    t.stop(s);
     float ms = t.elapsed_ms();
+    LAB_CUDA(cudaStreamDestroy(s));
     lab::print_bandwidth(label, bytes, ms);
 
     LAB_CUDA(cudaSetDevice(dev_src));

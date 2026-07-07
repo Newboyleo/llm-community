@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
     if (E % n != 0) { std::fprintf(stderr, "E must be divisible by n\n"); return 1; }
+    if (T % n != 0) { std::fprintf(stderr, "T must be divisible by n\n"); return 1; }
     int Tlocal = T / n;
 
     std::printf("==== lesson 16: mini MoE dispatch ====\n");
@@ -110,6 +111,7 @@ int main(int argc, char** argv) {
     std::vector<int> global_count(n * n, 0);
     for (int r = 0; r < n; ++r) {
         std::vector<int> row(n);
+        LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(row.data(), d_countrow[r], n * sizeof(int), cudaMemcpyDeviceToHost));
         for (int d = 0; d < n; ++d) global_count[r * n + d] = row[d];
     }
@@ -150,12 +152,16 @@ int main(int argc, char** argv) {
             size_t bytes = (size_t)cnt * D * sizeof(float);
             int s_off = send_base[src * n + dst];
             int d_off = recv_offset[src * n + dst];
+            LAB_CUDA(cudaSetDevice(src));
             LAB_CUDA(cudaMemcpyPeerAsync(d_recvbuf[dst] + (size_t)d_off * D, dst,
                                          d_sendbuf[src] + (size_t)s_off * D, src,
                                          bytes, streams[src]));
         }
     }
-    for (int r = 0; r < n; ++r) LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    for (int r = 0; r < n; ++r) {
+        LAB_CUDA(cudaSetDevice(r));
+        LAB_CUDA(cudaStreamSynchronize(streams[r]));
+    }
 
     // verify: each received token's stashed expert id maps to the receiving GPU
     bool ok = true;
@@ -163,6 +169,7 @@ int main(int argc, char** argv) {
     for (int r = 0; r < n; ++r) {
         int total = 0; for (int s = 0; s < n; ++s) total += global_count[s * n + r];
         std::vector<float> host((size_t)total * D);
+        LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(host.data(), d_recvbuf[r], host.size() * sizeof(float), cudaMemcpyDeviceToHost));
         for (int t = 0; t < total; ++t) {
             int e = (int)host[t * D];

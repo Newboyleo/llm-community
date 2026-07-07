@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
     ch.done  = (int*)nvshmem_malloc(cap * sizeof(int));
     LAB_CUDA(cudaMemset(ch.ready, 0, cap * sizeof(int)));
     LAB_CUDA(cudaMemset(ch.done, 0, cap * sizeof(int)));
+    nvshmem_barrier_all();
 
     int* out = (int*)nvshmem_malloc((size_t)n_batches * batch_size * sizeof(int));
 

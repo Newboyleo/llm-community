@@ -15,13 +15,15 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 
+#include "checks.hpp"
+
 namespace lab {
 
 class GpuTimer {
    public:
     GpuTimer() {
-        cudaEventCreate(&start_);
-        cudaEventCreate(&stop_);
+        LAB_CUDA(cudaEventCreate(&start_));
+        LAB_CUDA(cudaEventCreate(&stop_));
     }
     ~GpuTimer() {
         cudaEventDestroy(start_);
@@ -29,14 +31,14 @@ class GpuTimer {
     }
 
     // Record start onto a stream. Default stream is 0 (legacy default stream).
-    void start(cudaStream_t stream = nullptr) { cudaEventRecord(start_, stream); }
-    void stop(cudaStream_t stream = nullptr) { cudaEventRecord(stop_, stream); }
+    void start(cudaStream_t stream = nullptr) { LAB_CUDA(cudaEventRecord(start_, stream)); }
+    void stop(cudaStream_t stream = nullptr) { LAB_CUDA(cudaEventRecord(stop_, stream)); }
 
     // Block until the stop event has completed, then return elapsed ms.
     float elapsed_ms() {
-        cudaEventSynchronize(stop_);
+        LAB_CUDA(cudaEventSynchronize(stop_));
         float ms = 0.0f;
-        cudaEventElapsedTime(&ms, start_, stop_);
+        LAB_CUDA(cudaEventElapsedTime(&ms, start_, stop_));
         return ms;
     }
 
@@ -59,6 +61,10 @@ class CpuTimer {
 // Pretty-print a bandwidth figure given bytes moved and elapsed milliseconds.
 // Example: 1 GiB in 1.0 ms -> "8590.0 GB/s" (decimal GB, as nvidia-smi reports).
 inline void print_bandwidth(const char* label, size_t bytes, float ms) {
+    if (ms <= 0.0f) {
+        std::printf("[bw] %-24s %.3f ms  n/a  %zu bytes\n", label, ms, bytes);
+        return;
+    }
     double gb = static_cast<double>(bytes) / 1e9;        // decimal GB
     double gbs = gb / (ms / 1000.0);
     double gib = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
