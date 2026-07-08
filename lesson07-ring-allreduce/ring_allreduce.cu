@@ -73,7 +73,7 @@ static void ring_reduce_scatter(State& s) {
     for (int step = 0; step < n - 1; ++step) {
         for (int r = 0; r < n; ++r) {
             int next = (r + 1) % n;
-            int send_chunk = (r - step + n) % n;
+            int send_chunk = (r - step - 1 + n) % n;
             LAB_CUDA(cudaSetDevice(r));
             LAB_CUDA(cudaMemcpyPeerAsync(s.scratch[next], next,
                                          s.d[r] + send_chunk * chunk, r,
@@ -84,7 +84,7 @@ static void ring_reduce_scatter(State& s) {
             LAB_CUDA(cudaStreamSynchronize(s.streams[r]));
         }
         for (int r = 0; r < n; ++r) {
-            int recv_chunk = (r - step - 1 + n) % n;
+            int recv_chunk = (r - step - 2 + n) % n;
             LAB_CUDA(cudaSetDevice(r));
             add_into<<<(chunk + 255) / 256, 256, 0, s.streams[r]>>>(
                 s.d[r] + recv_chunk * chunk, s.scratch[r], chunk);

@@ -20,7 +20,9 @@ built:
 ```
 
 We also compare against a **naive** AllReduce (reduce-to-zero + broadcast) to
-make the bandwidth argument concrete.
+make the bandwidth argument concrete, and implement a third variant —
+**halving-doubling** AllReduce — to show the `O(log n)`-latency alternative to
+the ring's `O(n)`.
 
 ## Why does it matter?
 
@@ -107,10 +109,15 @@ tree. NCCL therefore runs:
 - `ring_all_gather(state)` — exactly lesson 4's ring, but the "slice" each
   rank forwards is now its *summed* owned chunk. After this, every rank has
   all summed chunks.
+- `halving_doubling_allreduce(state)` — the `O(log n)`-latency variant: a
+  recursive-halving ReduceScatter (each step pairs `r` with `r XOR (len/2)` and
+  halves the owned window) followed by a recursive-doubling AllGather (each
+  step pairs `r` with `r XOR len` and doubles the owned window). Same `≈ 2S`
+  per-rank volume as the ring, but `2·log2(n)` hops instead of `2(n-1)`.
 - `naive_allreduce` — reduce-to-zero (lesson 5 naive) + broadcast (lesson 3
   naive). For comparison.
 
-The whole AllReduce is literally:
+The whole ring AllReduce is literally:
 
 ```c
 ring_reduce_scatter(s);   // phase 1
@@ -153,17 +160,29 @@ rank0[0..3] = [6,6,6,6] ... OK
 ==== ring allreduce (RS + AG) ====
 rank0[0..3] = [6,6,6,6] ... OK
 0.46 ms   (6 steps, per-rank send ≈ 1.5·S)
+
+==== halving-doubling allreduce (recursive halving + doubling) ====
+rank0[0..3] = [6,6,6,6] ... OK
+0.39 ms   (4 = 2·log2(4) steps; O(log n) latency)
 ```
+
+(With a non-power-of-two GPU count, halving-doubling prints a skip notice
+instead — its XOR-partner scheme needs `n = 2^k`.)
 
 ---
 
 # Experiment
 
 1. **Vary n, hold S.** At n=2,4,8, ring time should stay ~flat (grows only in
-   the `α·(n-1)` term), while naive grows ~linearly. Plot it.
+   the `α·(n-1)` term), while naive grows ~linearly. Plot it. Halving-doubling's
+   latency grows only as `α·log2(n)` — it should pull further ahead of the ring
+   as `n` grows (try n=8), at least at small `S`.
 2. **Vary S, hold n.** For tiny S the ring's `2(n-1)·α` latency may lose to
    naive's `2α + β·(n-1)·S`. Find the crossover — it's where NCCL switches
-   algorithms.
+   algorithms. Now also find the ring-vs-halving-doubling crossover: at small
+   `S` halving-doubling wins (fewer hops); at large `S` the ring wins (uniform
+   `S/n` messages pipeline better than halving-doubling's `S/2`-then-shrinking
+   staircase). Both crossovers are real NCCL algorithm-switch points.
 3. **Chunk pipelining.** Split each `S/n` chunk into `k` sub-chunks and
    pipeline. The `(n-1)·α` term doesn't change, but the `β·S` term overlaps
    with compute. This is the single biggest ring optimization.
@@ -181,10 +200,55 @@ rank0[0..3] = [6,6,6,6] ... OK
   `≈ 2S/BW` — independent of `n`. The latency term `2(n-1)·α` is the ring's
   weakness, fixed only by trees (lesson 3) or by hiding it under compute
   (overlap).
+- **Halving-doubling** time ≈ `2·log2(n)·α + 2·S·(n-1)/n / BW`. Same bandwidth
+  term, latency now `O(log n)`. Wins at small `S` (latency-bound); loses to the
+  ring at large `S` because its per-step message sizes are `S/2, S/4, …` (the
+  first reduce step alone sends `S/2`, twice the ring's constant `S/n`), which
+  both underutilizes links on the small steps and resists pipelining.
 - **DeepSeek/NCCL improvement:** run **two rings in opposite directions**
   simultaneously (one for RS, one for AG, or both halves of the ring). This
   doubles link utilization and is standard. Our lesson uses one direction for
   clarity.
+
+## Halving-doubling: the `O(log n)`-latency cousin
+
+Ring AllReduce pays `2·(n-1)·α` latency — linear in `n`. At 64 GPUs that's 126
+latency steps; the bandwidth term is gorgeous but the startup tax bites.
+
+**Halving-doubling** (recursive halving + recursive doubling) replaces the ring
+with a binary partner scheme. Each rank tracks a window `[off, off+len)` of the
+buffer it currently "owns":
+
+- **Reduce phase** (`len`: `n → n/2 → … → 1`): at each step, rank `r` pairs with
+  `partner = r XOR (len/2)`. Both share the same window. Each sends the half of
+  the window closer to its partner and reduces the received half into the half
+  it keeps. The window halves. After `log2(n)` steps every rank owns one chunk =
+  the sum across all ranks.
+- **AllGather phase** (`len`: `1 → 2 → … → n`): at each step, rank `r` pairs
+  with `partner = r XOR len`. They exchange their owned runs and each writes the
+  partner's run into the adjacent half, doubling its owned region. After
+  `log2(n)` steps every rank owns the full reduced buffer.
+
+| Phase          | Steps       | Per-rank send total        | Latency hops |
+|----------------|-------------|----------------------------|--------------|
+| ReduceScatter  | log2(n)     | S·(n-1)/n (reduce)         | log2(n)      |
+| AllGather      | log2(n)     | S·(n-1)/n (copy)           | log2(n)      |
+| **Total**      | **2·log2(n)** | **2·S·(n-1)/n ≈ 2S**     | **2·log2(n)**|
+
+Same bandwidth-optimal `≈ 2S` per-rank volume as the ring, but latency is
+`O(log n)` instead of `O(n)`. The catch: the **per-step message size is not
+constant** — the reduce phase sends `S/2, S/4, …, S/n` (decreasing) and the
+allgather sends `S/n, …, S/2` (increasing). The ring keeps every message at
+`S/n`, which is friendlier to pipelining and to small-message NIC overhead, so
+the ring usually wins at large `S` despite the worse latency. NCCL therefore
+treats halving-doubling (the recursive-halving "tree") as the **small-`S`
+algorithm** and the ring as the **large-`S` algorithm**. Halving-doubling also
+needs `n` to be a power of two — NCCL pads non-power-of-two counts.
+
+When you run this lesson, watch: at small `S` halving-doubling beats the ring
+(fewer `α` hops); at large `S` the ring pulls ahead (uniform `S/n` messages
+pipeline better than the `S/2`-then-shrinking staircase). The crossover is the
+real NCCL algorithm-switch point.
 
 ---
 

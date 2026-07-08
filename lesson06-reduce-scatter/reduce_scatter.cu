@@ -3,7 +3,9 @@
 // ReduceScatter: each rank r ends up owning chunk r of the element-wise sum.
 // Implemented naive and ring. Ring is the first half of ring AllReduce.
 
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "checks.hpp"
@@ -14,6 +16,10 @@
 __global__ void add_into(int* dst, const int* src, int L) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < L) dst[i] += src[i];
+}
+
+static int initial_value(int rank, int chunk_id, int elem) {
+    return rank * 1000000 + chunk_id * 1000 + (elem & 1023);
 }
 
 struct State {
@@ -35,7 +41,12 @@ static State setup(int n, int chunk) {
         LAB_CUDA(cudaMalloc(&s.d[r], L * sizeof(int)));
         LAB_CUDA(cudaMalloc(&s.scratch[r], chunk * sizeof(int)));
         LAB_CUDA(cudaStreamCreate(&s.streams[r]));
-        std::vector<int> tmp(L, r);  // rank r -> value r; chunk sum = 0+1+...+(n-1)
+        std::vector<int> tmp(L);
+        for (int c = 0; c < n; ++c) {
+            for (int i = 0; i < chunk; ++i) {
+                tmp[c * chunk + i] = initial_value(r, c, i);
+            }
+        }
         LAB_CUDA(cudaMemcpy(s.d[r], tmp.data(), L * sizeof(int), cudaMemcpyHostToDevice));
     }
     return s;
@@ -50,13 +61,18 @@ static void teardown(State& s) {
 }
 
 static bool verify(State& s) {
-    int expect = 0; for (int r = 0; r < s.n; ++r) expect += r;
     for (int r = 0; r < s.n; ++r) {
         std::vector<int> host(s.chunk);
         LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(host.data(), s.d[r] + r * s.chunk, s.chunk * sizeof(int),
                             cudaMemcpyDeviceToHost));
-        for (int i = 0; i < s.chunk; ++i) if (host[i] != expect) return false;
+        for (int i = 0; i < s.chunk; ++i) {
+            int expect = 0;
+            for (int src = 0; src < s.n; ++src) {
+                expect += initial_value(src, r, i);
+            }
+            if (host[i] != expect) return false;
+        }
     }
     return true;
 }
@@ -86,8 +102,8 @@ static float rs_naive(State& s) {
     return t.elapsed_ms();
 }
 
-// ring: n-1 steps. At step k, rank r forwards chunk (owned-step) to r+1,
-// receives chunk (owned-step-1) from r-1 into scratch, adds into that slot.
+// ring: n-1 steps. At step k, rank r forwards chunk (r-step-1) to r+1,
+// receives chunk (r-step-2) from r-1 into scratch, adds into that slot.
 static float rs_ring(State& s) {
     int n = s.n, chunk = s.chunk;
     size_t cb = chunk * sizeof(int);
@@ -97,8 +113,7 @@ static float rs_ring(State& s) {
     for (int step = 0; step < n - 1; ++step) {
         for (int r = 0; r < n; ++r) {
             int next = (r + 1) % n;
-            int owned = r;
-            int send_chunk = (owned - step + n) % n;
+            int send_chunk = (r - step - 1 + n) % n;
             // r sends its send_chunk slot to next's scratch
             LAB_CUDA(cudaSetDevice(r));
             LAB_CUDA(cudaMemcpyPeerAsync(s.scratch[next], next,
@@ -111,8 +126,7 @@ static float rs_ring(State& s) {
         }
         // each receiver adds scratch into its recv_chunk slot
         for (int r = 0; r < n; ++r) {
-            int owned = r;
-            int recv_chunk = (owned - step - 1 + n) % n;
+            int recv_chunk = (r - step - 2 + n) % n;
             LAB_CUDA(cudaSetDevice(r));
             add_into<<<(chunk + 255) / 256, 256, 0, s.streams[r]>>>(
                 s.d[r] + recv_chunk * chunk, s.scratch[r], chunk);
@@ -132,6 +146,8 @@ int main(int argc, char** argv) {
     if (n > 8) n = 8;
     int chunk = 1 << 16;  // 256 KiB ints per chunk
     if (argc > 1) chunk = std::atoi(argv[1]);
+    LAB_CHECK(chunk > 0, "chunk must be positive");
+    LAB_CHECK(chunk <= INT_MAX / n, "n*chunk overflows int");
 
     std::printf("==== lesson 06: reduce-scatter ====\n");
     lab::enable_all_peers(n);
