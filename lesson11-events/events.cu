@@ -19,7 +19,6 @@ __global__ void busy_kernel(float target_ms) {
 // Producer writes a flag; consumer reads it. Correct only if consumer waits
 // on the producer's event.
 __global__ void write_flag(int* flag, int val) { *flag = val; }
-__global__ int read_flag(int* flag) { return *flag; }
 
 static void demo_dependency() {
     std::printf("[dependency] stream B waits on stream A's event\n");
