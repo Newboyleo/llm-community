@@ -59,6 +59,6 @@ inline std::string cuda_err_str(cudaError_t e) {
     do {                                                                     \
         if (!(cond)) {                                                       \
             ::lab::fail(__FILE__, __LINE__,                                  \
-                        std::string("check failed: (") #cond ") " + msg);    \
+                        std::string("check failed: (") + #cond + ") " + msg);\
         }                                                                    \
     } while (0)
