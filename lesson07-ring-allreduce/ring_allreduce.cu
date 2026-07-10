@@ -19,8 +19,9 @@ __global__ void add_into(int* dst, const int* src, int L) {
 struct State {
     int n, chunk;  // L = n*chunk
     std::vector<int*> d;
-    std::vector<int*> scratch;     // ring/naive: one-chunk recv buffer
+    std::vector<int*> scratch;     // ring: one-chunk recv buffer
     std::vector<int*> hd_scratch;  // halving-doubling: up to (n/2)*chunk recv buffer
+    int* naive_scratch;            // naive: full-buffer recv scratch on rank 0
     std::vector<cudaStream_t> streams;
 };
 
@@ -30,6 +31,7 @@ static State setup(int n, int chunk) {
     s.d.assign(n, nullptr);
     s.scratch.assign(n, nullptr);
     s.hd_scratch.assign(n, nullptr);
+    s.naive_scratch = nullptr;
     s.streams.assign(n, nullptr);
     for (int r = 0; r < n; ++r) {
         LAB_CUDA(cudaSetDevice(r));
@@ -43,9 +45,13 @@ static State setup(int n, int chunk) {
         std::vector<int> tmp(L, r);
         LAB_CUDA(cudaMemcpy(s.d[r], tmp.data(), L * sizeof(int), cudaMemcpyHostToDevice));
     }
+    LAB_CUDA(cudaSetDevice(0));
+    LAB_CUDA(cudaMalloc(&s.naive_scratch, L * sizeof(int)));
     return s;
 }
 static void teardown(State& s) {
+    LAB_CUDA(cudaSetDevice(0));
+    LAB_CUDA(cudaFree(s.naive_scratch));
     for (int r = 0; r < s.n; ++r) {
         LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaFree(s.d[r]));
@@ -232,9 +238,9 @@ static float naive_allreduce(State& s) {
     t.start(s.streams[0]);
     // reduce to rank 0
     for (int r = 1; r < n; ++r) {
-        LAB_CUDA(cudaMemcpyPeerAsync(s.scratch[0], 0, s.d[r], r, lb, s.streams[0]));
+        LAB_CUDA(cudaMemcpyPeerAsync(s.naive_scratch, 0, s.d[r], r, lb, s.streams[0]));
         LAB_CUDA(cudaStreamSynchronize(s.streams[0]));
-        add_into<<<(L + 255) / 256, 256, 0, s.streams[0]>>>(s.d[0], s.scratch[0], L);
+        add_into<<<(L + 255) / 256, 256, 0, s.streams[0]>>>(s.d[0], s.naive_scratch, L);
         LAB_CUDA(cudaStreamSynchronize(s.streams[0]));
     }
     // broadcast from rank 0
