@@ -137,3 +137,32 @@ dispatch is a routing-driven **non-uniform AllToAllv**:
 This lesson keeps the transport simple and host-orchestrated. Later lessons
 replace pieces with realistic routing, flags, channels, and NVSHMEM-style
 device-initiated puts.
+
+
+                      A2AContext
+┌────────────────────────────────────────────────────────────┐
+│ Basic Config                                               │
+│  n, tokens_per_rank, hidden_dim, total_tokens              │
+├────────────────────────────────────────────────────────────┤
+│ Dispatch Plan                                              │
+│  counts[src][dst]                                          │
+│  dispatch_send_offsets[src][dst]                           │
+│  dispatch_recv_offsets[src][dst]                           │
+├────────────────────────────────────────────────────────────┤
+│ Combine Plan                                               │
+│  combine_counts (countsᵀ)                                 │
+│  combine_send_offsets                                      │
+│  combine_recv_offsets                                      │
+├────────────────────────────────────────────────────────────┤
+│ Routing Metadata                                           │
+│  h_route            (token → expert)                       │
+│  h_slot_in_bucket   (token 在目标 bucket 中的位置)         │
+├────────────────────────────────────────────────────────────┤
+│ GPU Buffers (每个 Rank 一份)                               │
+│  d_tokens      输入 Token                                  │
+│  d_sendbuf     Dispatch 打包后的发送缓冲区                 │
+│  d_recvbuf     Expert 接收到的数据                         │
+│  d_returnbuf   Combine 返回的数据                          │
+│  d_output      最终恢复原顺序的输出                        │
+│  d_route / d_slot_in_bucket / d_dispatch_send_base         │
+└────────────────────────────────────────────────────────────┘
