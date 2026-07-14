@@ -91,7 +91,7 @@ static void demo_timing() {
 static void demo_pipeline() {
     std::printf("[pipeline] 3-stage copy/compute, event-wired\n");
     const int N = 3;
-    size_t bytes = 1ull << 24;  // 16 MiB per chunk
+    size_t bytes = 1ull << 28;  // 16 MiB per chunk
     std::vector<int*> d(N);
     int* h;
     LAB_CUDA(cudaMallocHost(&h, bytes));
