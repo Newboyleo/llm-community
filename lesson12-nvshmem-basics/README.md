@@ -180,12 +180,23 @@ cmake --build build -j --target nvshmem_basics
 NVSHMEM ships its own CMake package; this lesson's `CMakeLists.txt` links
 `NVSHMEM::nvshmem` (or the raw library if the package isn't found).
 
-Running NVSHMEM programs needs the bootstrap; for single-node, the default
-"shmem" bootstrap works:
+Running NVSHMEM programs needs the NVSHMEM launcher so multiple PEs are
+created. This lesson needs at least two PEs:
 
 ```bash
 # NVSHMEM needs CUDA_VISIBLE_DEVICES to map PEs to GPUs.
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson12-nvshmem-basics/nvshmem_basics
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson12-nvshmem-basics/nvshmem_basics
+```
+
+If the machine has InfiniBand devices but no `nvidia_peermem`/`nv_peer_mem`
+kernel module, NVSHMEM may print an IB DMA-BUF probe warning before falling back
+to the local GPU path. For this single-node lesson, disable that probe:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_IB_DISABLE_DMABUF=1 \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson12-nvshmem-basics/nvshmem_basics
 ```
 
 ---
@@ -193,7 +204,8 @@ CUDA_VISIBLE_DEVICES=0,1 ./build/lesson12-nvshmem-basics/nvshmem_basics
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson12-nvshmem-basics/nvshmem_basics
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson12-nvshmem-basics/nvshmem_basics
 ```
 
 ---

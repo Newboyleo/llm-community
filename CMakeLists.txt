@@ -3,6 +3,15 @@ cmake_minimum_required(VERSION 3.18)
 project(llm_communication_lab LANGUAGES CXX CUDA)
 find_package(CUDAToolkit REQUIRED)
 
+if(NOT DEFINED NVSHMEM_DIR AND CMAKE_LIBRARY_ARCHITECTURE)
+    set(_nvshmem_deb_config
+        "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/nvshmem/${CUDAToolkit_VERSION_MAJOR}/cmake/nvshmem")
+    if(EXISTS "${_nvshmem_deb_config}/NVSHMEMConfig.cmake")
+        set(NVSHMEM_DIR "${_nvshmem_deb_config}" CACHE PATH "NVSHMEM CMake package directory")
+    endif()
+    unset(_nvshmem_deb_config)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -18,6 +27,22 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 80)
 endif()
 
+if(DEFINED NVSHMEM_DIR)
+    foreach(_cuda_arch ${CMAKE_CUDA_ARCHITECTURES})
+        string(REGEX REPLACE "-(real|virtual)$" "" _cuda_arch_num "${_cuda_arch}")
+        if(_cuda_arch_num MATCHES "^[0-9]+$" AND _cuda_arch_num LESS 70)
+            message(FATAL_ERROR
+                "NVSHMEM lessons require CMAKE_CUDA_ARCHITECTURES >= 70, "
+                "but got ${CMAKE_CUDA_ARCHITECTURES}. Reconfigure with e.g. "
+                "`cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=70` or `80`. "
+                "If this build directory cached an older value such as 52, remove "
+                "the cache or pass -DCMAKE_CUDA_ARCHITECTURES explicitly.")
+        endif()
+    endforeach()
+    unset(_cuda_arch_num)
+    unset(_cuda_arch)
+endif()
+
 # Common helpers compile into a static lib that every lesson links.
 add_subdirectory(common)
 
@@ -25,8 +50,8 @@ add_subdirectory(common)
 # dependency (e.g. NVSHMEM) does not break the rest of the build.
 option(BUILD_ALL_LESSONS "Build every lesson" ON)
 
-# --- CUDA-only lessons -------------------------------------------------------
-set(CUDA_LESSONS
+# --- Default lessons ---------------------------------------------------------
+set(DEFAULT_LESSONS
     lesson01-gpu-copy
     lesson02-peer-copy
     lesson03-broadcast
@@ -38,18 +63,23 @@ set(CUDA_LESSONS
     lesson09-ring-buffer
     lesson10-streams
     lesson11-events
+    lesson12-nvshmem-basics
+    lesson13-nvshmem-ring-buffer
+    lesson14-producer-consumer
     lesson15-token-routing
     lesson16-moe-dispatch
 )
 
-foreach(lesson ${CUDA_LESSONS})
+foreach(lesson ${DEFAULT_LESSONS})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${lesson}/CMakeLists.txt")
         add_subdirectory(${lesson})
     endif()
 endforeach()
 
-# --- NVSHMEM lessons ---------------------------------------------------------
-# These require NVSHMEM. Gate behind a find to avoid breaking the CUDA-only build.
+# --- Advanced NVSHMEM lessons ------------------------------------------------
+# These require NVSHMEM and are kept optional because they are later DeepEP-style
+# exercises. Lessons 12-14 are included in the default lesson list above; their
+# own CMake files skip targets cleanly when NVSHMEM is unavailable.
 option(BUILD_NVSHMEM_LESSONS "Build NVSHMEM lessons" OFF)
 if(BUILD_NVSHMEM_LESSONS)
     find_package(NVSHMEM)
@@ -60,9 +90,6 @@ if(BUILD_NVSHMEM_LESSONS)
             "Skipping NVSHMEM lessons.")
     else()
         set(NVSHMEM_LESSONS
-            lesson12-nvshmem-basics
-            lesson13-nvshmem-ring-buffer
-            lesson14-producer-consumer
             lesson17-mini-deepep
             lesson19-optimizing
         )

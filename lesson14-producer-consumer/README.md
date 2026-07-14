@@ -145,9 +145,11 @@ cmake --build build -j --target producer_consumer
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson14-producer-consumer/producer_consumer
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson14-producer-consumer/producer_consumer
 # batches, batch_size
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson14-producer-consumer/producer_consumer 100 256
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson14-producer-consumer/producer_consumer 100 256
 ```
 
 ---

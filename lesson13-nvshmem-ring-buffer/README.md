@@ -158,8 +158,10 @@ cmake --build build -j --target nvshmem_ring_buffer
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer 8 10000
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer 8 10000
 ```
 
 ---

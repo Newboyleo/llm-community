@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
     nvshmem_init();
     int n = nvshmem_n_pes();
     if (n < 2) { nvshmem_finalize(); return 1; }
+    LAB_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);

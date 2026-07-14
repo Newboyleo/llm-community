@@ -163,9 +163,11 @@ cmake --build build -j --target mini_deepep
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson17-mini-deepep/mini_deepep
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson17-mini-deepep/mini_deepep
 # T E D channels
-CUDA_VISIBLE_DEVICES=0,1,2,3 ./build/lesson17-mini-deepep/mini_deepep 2048 8 256 4
+CUDA_VISIBLE_DEVICES=0,1,2,3 /usr/bin/nvshmem_12/nvshmrun -np 4 \
+    ./build/lesson17-mini-deepep/mini_deepep 2048 8 256 4
 ```
 
 ---

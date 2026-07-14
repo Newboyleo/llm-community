@@ -71,9 +71,15 @@ int main(int argc, char** argv) {
     nvshmem_init();
     int pe = nvshmem_my_pe(), npes = nvshmem_n_pes();
     if (npes < 2) {
-        if (pe == 0) std::fprintf(stderr, "needs >=2 PEs\n");
+        if (pe == 0) {
+            std::fprintf(stderr,
+                         "needs >=2 PEs; run with: CUDA_VISIBLE_DEVICES=0,1 "
+                         "/usr/bin/nvshmem_12/nvshmrun -np 2 "
+                         "./build/lesson14-producer-consumer/producer_consumer\n");
+        }
         nvshmem_finalize(); return 1;
     }
+    LAB_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     if (pe == 0)
         std::printf("==== lesson 14: producer/consumer (signaled) ====\n"
                     "batches=%d, batch_size=%d, capacity=%d\n",

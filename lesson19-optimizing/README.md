@@ -165,7 +165,8 @@ cmake --build build -j --target optimizing
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 ./build/lesson19-optimizing/optimizing
+CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson19-optimizing/optimizing
 ```
 
 ---

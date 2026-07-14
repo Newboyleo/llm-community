@@ -34,6 +34,15 @@ __global__ void get_kernel(const int* buf, int* out, int n, int src_pe) {
     }
 }
 
+static void print_device_by_pe(int pe, int owner_pe, const char* label, const int* data, int n) {
+    nvshmem_barrier_all();
+    if (pe == owner_pe) {
+        lab::print_device(label, data, n, 4);
+        std::fflush(stdout);
+    }
+    nvshmem_barrier_all();
+}
+
 int main() {
     nvshmem_init();
     int pe = nvshmem_my_pe();
@@ -41,19 +50,36 @@ int main() {
     if (pe == 0) {
         std::printf("==== lesson 12: NVSHMEM basics ====\nn_pes = %d\n", npes);
     }
+    if (npes < 2) {
+        if (pe == 0) {
+            std::fprintf(stderr,
+                         "lesson 12 needs at least 2 NVSHMEM PEs.\n"
+                         "Run with: CUDA_VISIBLE_DEVICES=0,1 "
+                         "/usr/bin/nvshmem_12/nvshmrun -np 2 "
+                         "./build/lesson12-nvshmem-basics/nvshmem_basics\n");
+        }
+        nvshmem_finalize();
+        return 1;
+    }
+    int local_pe = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+    LAB_CUDA(cudaSetDevice(local_pe));
 
     const int n = 1 << 14;  // 16K ints
     int* buf = (int*)nvshmem_malloc(n * sizeof(int));
     int* local = (int*)nvshmem_malloc(n * sizeof(int));
+    if (buf == nullptr || local == nullptr) {
+        std::fprintf(stderr, "PE %d: nvshmem_malloc failed\n", pe);
+        nvshmem_finalize();
+        return 1;
+    }
 
     // init each PE's buffer
     init_kernel<<<(n + 255) / 256, 256>>>(buf, n, pe);
-    LAB_CUDA(cudaDeviceSynchronize());
+    LAB_CUDA_SYNC();
     nvshmem_barrier_all();   // also implies quiet
 
-    if (pe < 2) {
-        lab::print_device("  buf", buf, n, 4);
-    }
+    print_device_by_pe(pe, 0, "  PE0 buf", buf, n);
+    print_device_by_pe(pe, 1, "  PE1 buf", buf, n);
 
     // PE 0 puts markers into PE 1's buffer
     if (pe == 0 && npes >= 2) {
@@ -67,6 +93,7 @@ int main() {
 
     if (pe == 1) {
         lab::print_device("  PE1 buf after put", buf, n, 4);
+        std::fflush(stdout);
     }
 
     // PE 1 gets PE 0's buffer into local
@@ -75,6 +102,7 @@ int main() {
         LAB_CUDA(cudaDeviceSynchronize());
         nvshmem_quiet();
         lab::print_device("  PE1 local after get", local, n, 4);
+        std::fflush(stdout);
     }
 
     nvshmem_free(buf);

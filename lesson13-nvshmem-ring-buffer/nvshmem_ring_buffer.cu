@@ -69,10 +69,16 @@ int main(int argc, char** argv) {
     int pe = nvshmem_my_pe();
     int npes = nvshmem_n_pes();
     if (npes < 2) {
-        if (pe == 0) std::fprintf(stderr, "needs >=2 PEs (CUDA_VISIBLE_DEVICES=0,1)\n");
+        if (pe == 0) {
+            std::fprintf(stderr,
+                         "needs >=2 PEs; run with: CUDA_VISIBLE_DEVICES=0,1 "
+                         "/usr/bin/nvshmem_12/nvshmrun -np 2 "
+                         "./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer\n");
+        }
         nvshmem_finalize();
         return 1;
     }
+    LAB_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     if (pe == 0)
         std::printf("==== lesson 13: NVSHMEM ring buffer ====\n"
                     "PE0=producer, PE1=consumer, capacity=%d, count=%d\n", cap, count);
