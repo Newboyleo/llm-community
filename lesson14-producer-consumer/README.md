@@ -79,10 +79,10 @@ You *could* have the consumer poll the head counter (lesson 13). But:
 Producer:                        Consumer:
   put batch data                   loop: if (*ready_flag == my_seq) break;
   quiet                            (process batch)
-  *ready_flag_local = my_seq       *done_flag_local = my_seq
+  *ready_flag_local = my_seq
   put ready_flag -> consumer       put done_flag -> producer
                                    quiet
-  loop: if (*done_flag == my_seq) break;
+  loop: if (*done_flag_local == my_seq) break;
   (reuse buffer for next batch)
 ```
 
@@ -127,8 +127,7 @@ nvshmem_quiet();
 int seq = b + 1;                       // 1-based so 0 means "empty"
 nvshmem_int_put(ch.ready, &seq, 1, cons_pe);
 nvshmem_quiet();
-int d;
-do { d = nvshmem_int_g(ch.done, cons_pe); } while (d != seq);
+nvshmem_int_wait_until(ch.done, NVSHMEM_CMP_EQ, seq);
 ```
 
 ---
@@ -145,12 +144,18 @@ cmake --build build -j --target producer_consumer
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson14-producer-consumer/producer_consumer
 # batches, batch_size
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson14-producer-consumer/producer_consumer 100 256
 ```
+
+`NVSHMEM_REMOTE_TRANSPORT=none` keeps this single-node lesson on the local GPU
+P2P path. Do not use it for multi-node NVSHMEM runs, where a remote transport
+is required.
 
 ---
 

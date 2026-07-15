@@ -1,7 +1,8 @@
 # Lesson 13 — NVSHMEM Ring Buffer
 
-> Lesson 9's SPSC ring buffer, reborn across GPUs. The head lives on the
-> producer PE, the tail on the consumer PE, and the slots in symmetric memory.
+> Lesson 9's SPSC ring buffer, reborn across GPUs. The producer echoes head
+> to the consumer PE, the consumer echoes tail to the producer PE, and the
+> slots live in symmetric memory.
 > A kernel on the producer streams tokens straight into the consumer's HBM.
 
 ---
@@ -64,10 +65,11 @@ router deciding which channel each token takes. Those are lessons 14–17.
 - `slots[cap]` — **symmetric**. Producer writes to `&slots[head%cap]` on the
   *consumer's* PE via `nvshmem_int_put`. (Equivalently, put to the consumer's
   copy of `slots`, same VA.)
-- `head` — **symmetric**. Producer owns it; consumer reads it. Producer
+- `head` — **symmetric**. Producer owns it; consumer reads it locally after
+  the producer echoes updates to the consumer PE. Producer
   `nvshmem_int_put`s the new head to the consumer after a `quiet`.
-- `tail` — **symmetric**. Consumer owns it; producer reads it (via
-  `nvshmem_int_g`) to check for full.
+- `tail` — **symmetric**. Consumer owns it; producer reads it locally after
+  the consumer echoes updates back to the producer PE to check for full.
 
 ## The producer push (device-side)
 
@@ -75,7 +77,7 @@ router deciding which channel each token takes. Those are lessons 14–17.
 __device__ void push(SymmRing r, int val, int cons_pe) {
     for (;;) {
         int h = r.head_local;                 // my own head
-        int t = nvshmem_int_g(r.tail_ptr, cons_pe);  // remote tail
+        int t = *r.tail_ptr;                  // local tail mirror
         if (h - t < r.cap) break;             // not full
     }
     nvshmem_int_put(&r.slots[h % r.cap], &val, 1, cons_pe);  // data -> consumer
@@ -101,7 +103,7 @@ __device__ int pop(SymmRing r) {
     }
     int v = r.slots[t % r.cap];     // local read of symmetric slot
     r.tail_local = t + 1;
-    // tail is informational for the producer; put it back so producer sees full
+    // tail is informational for the producer; put it back so producer sees not full
     int newt = t + 1;
     nvshmem_int_put(r.tail_ptr, &newt, 1, /*producer_pe=*/...);  // or use a shared atomic
     return v;
@@ -122,7 +124,7 @@ consumer reads `head` locally because the producer put it there.)
    ┌──────────────┐                    ┌──────────────┐
    │ head_local   │  put head ───────▶ │ head (symm)  │ ◀ read by consumer
    │              │  put data ───────▶ │ slots[]      │ ◀ read by consumer
-   │              │  get tail ◀─────── │ tail (symm)  │ ◀ written by consumer
+   │ tail (symm)  │ ◀ put tail ─────── │              │ ◀ written by consumer
    └──────────────┘                    └──────────────┘
         push loop                            pop loop
 ```
@@ -158,11 +160,18 @@ cmake --build build -j --target nvshmem_ring_buffer
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson13-nvshmem-ring-buffer/nvshmem_ring_buffer 8 10000
 ```
+
+`NVSHMEM_REMOTE_TRANSPORT=none` keeps this single-node lesson on the local GPU
+P2P path. Without it, NVSHMEM may try the IB/RDMA transport first; on machines
+without `nvidia_peermem`/`nv_peer_mem`, that path can report a DMA-BUF failure
+and stall during startup.
 
 ---
 

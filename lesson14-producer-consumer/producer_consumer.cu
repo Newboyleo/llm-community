@@ -5,6 +5,7 @@
 // processes, sets done=seq; producer polls done==seq then reuses the slot.
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include <nvshmem.h>
@@ -15,8 +16,8 @@
 
 struct Channel {
     int* slots;   // symmetric, cap * batch_size ints
-    int* ready;   // symmetric, producer writes (via put), consumer reads
-    int* done;    // symmetric, consumer writes (via put), producer reads
+    int* ready;   // symmetric, producer echoes updates to consumer, read by consumer
+    int* done;    // symmetric, consumer echoes updates to producer, read by producer
     int cap;
     int batch_size;
 };
@@ -38,9 +39,8 @@ __global__ void producer_kernel(Channel ch, int n_batches, int cons_pe) {
         nvshmem_quiet();
         nvshmem_int_put(ch.ready + slot, &seq, 1, cons_pe);
         nvshmem_quiet();
-        // wait for done
-        int d;
-        do { d = nvshmem_int_g(ch.done + slot, cons_pe); } while (d != seq);
+        // Consumer echoes done into this PE's symmetric done flag.
+        nvshmem_int_wait_until(ch.done + slot, NVSHMEM_CMP_EQ, seq);
     }
 }
 
@@ -51,8 +51,7 @@ __global__ void consumer_kernel(Channel ch, int n_batches, int* out, int prod_pe
     for (int b = 0; b < n_batches; ++b) {
         int slot = b % ch.cap;
         int seq = b + 1;
-        int r;
-        do { r = ch.ready[slot]; } while (r != seq);   // poll local ready
+        nvshmem_int_wait_until(ch.ready + slot, NVSHMEM_CMP_EQ, seq);
         // copy slot into out (process)
         for (int i = 0; i < batch_ints; ++i)
             out[b * batch_ints + i] = ch.slots[slot * batch_ints + i];

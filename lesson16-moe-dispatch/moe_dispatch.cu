@@ -5,6 +5,7 @@
 // Host-orchestrated peer copies; lesson 17 replaces these with NVSHMEM.
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "checks.hpp"
@@ -63,6 +64,14 @@ int main(int argc, char** argv) {
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
+    if (T <= 0 || E <= 0 || D <= 0) {
+        std::fprintf(stderr, "T, E, and D must all be positive\n");
+        return 1;
+    }
+    if (E > 1024) {
+        std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
+        return 1;
+    }
     if (E % n != 0) { std::fprintf(stderr, "E must be divisible by n\n"); return 1; }
     if (T % n != 0) { std::fprintf(stderr, "T must be divisible by n\n"); return 1; }
     int Tlocal = T / n;

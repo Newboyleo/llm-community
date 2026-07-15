@@ -5,6 +5,7 @@
 // the dispatch plan that lessons 16/17 consume across GPUs.
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "checks.hpp"
@@ -64,6 +65,14 @@ int main(int argc, char** argv) {
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
     if (argc > 4) n = std::atoi(argv[4]);
+    if (T <= 0 || E <= 0 || D <= 0 || n <= 0) {
+        std::fprintf(stderr, "T, E, D, and n must all be positive\n");
+        return 1;
+    }
+    if (E > 1024) {
+        std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
+        return 1;
+    }
     if (E % n != 0) { std::fprintf(stderr, "E must be divisible by n\n"); return 1; }
 
     std::printf("==== lesson 15: token routing ====\n");

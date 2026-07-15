@@ -5,6 +5,8 @@
 // is head/tail in symmetric memory + nvshmem_quiet before head advances.
 
 #include <cstdio>
+#include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 #include <nvshmem.h>
@@ -16,7 +18,7 @@
 struct SymmRing {
     int* slots;   // symmetric, cap ints
     int* head;    // symmetric, owned by producer (writes), read by consumer
-    int* tail;    // symmetric, owned by consumer (writes), read by producer
+    int* tail;    // symmetric, consumer echoes updates to producer, read by producer
     int cap;
 };
 
@@ -24,12 +26,12 @@ struct SymmRing {
 __global__ void producer_kernel(SymmRing r, int count, int cons_pe) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     int head_local = 0;
+    volatile int* tail_local = r.tail;
     for (int i = 0; i < count; ++i) {
-        // wait while full: head_local - remote_tail == cap
-        int tail_remote;
-        do {
-            tail_remote = nvshmem_int_g(r.tail, cons_pe);
-        } while (head_local - tail_remote >= r.cap);
+        // Consumer echoes tail into this PE's symmetric tail, so wait locally.
+        if (head_local - *tail_local >= r.cap) {
+            nvshmem_int_wait_until(r.tail, NVSHMEM_CMP_GT, head_local - r.cap);
+        }
 
         int slot = head_local % r.cap;
         int val = i;
@@ -45,14 +47,12 @@ __global__ void producer_kernel(SymmRing r, int count, int cons_pe) {
 __global__ void consumer_kernel(SymmRing r, int* out, int count, int prod_pe) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     int tail_local = 0;
+    volatile int* slots_local = r.slots;
     for (int i = 0; i < count; ++i) {
-        int head_seen;
-        do {
-            head_seen = *r.head;   // producer put head here; local read
-        } while (head_seen == tail_local);  // empty -> spin
+        nvshmem_int_wait_until(r.head, NVSHMEM_CMP_NE, tail_local);
 
         int slot = tail_local % r.cap;
-        out[i] = r.slots[slot];   // local read of symmetric slot
+        out[i] = slots_local[slot];   // local read of symmetric slot
         ++tail_local;
         // echo tail back to producer so it can see "not full"
         nvshmem_int_put(r.tail, &tail_local, 1, prod_pe);
@@ -109,7 +109,8 @@ int main(int argc, char** argv) {
         bool in_order = true;
         for (int i = 0; i < count; ++i) if (h[i] != i) { in_order = false; break; }
         std::printf("PE1 popped %d values\n", count);
-        lab::print_host("first 8", h.data(), 8, 8);
+        int nprint = std::min(count, 8);
+        lab::print_host("first values", h.data(), nprint, nprint);
         std::printf("in order: %s\n", in_order ? "YES" : "NO");
     }
 
