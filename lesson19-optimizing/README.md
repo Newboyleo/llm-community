@@ -165,9 +165,14 @@ cmake --build build -j --target optimizing
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson19-optimizing/optimizing
 ```
+
+`NVSHMEM_REMOTE_TRANSPORT=none` keeps this single-node sweep on the local GPU
+P2P path. Do not use it for multi-node NVSHMEM runs, where a remote transport
+is required.
 
 ---
 

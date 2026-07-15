@@ -103,7 +103,7 @@ producer (src), per channel c, per dst d:
     nvshmem_quiet()
 
 consumer (dst), per channel c:
-    while (*ready[c] != expected_seq) ;                // poll local flag
+    nvshmem_int_wait_until(ready[c], NVSHMEM_CMP_EQ, expected_seq)
     // tokens are in recvbuf[c]; expert kernel may run
 ```
 
@@ -163,12 +163,18 @@ cmake --build build -j --target mini_deepep
 # Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 /usr/bin/nvshmem_12/nvshmrun -np 2 \
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
     ./build/lesson17-mini-deepep/mini_deepep
 # T E D channels
-CUDA_VISIBLE_DEVICES=0,1,2,3 /usr/bin/nvshmem_12/nvshmrun -np 4 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 4 \
     ./build/lesson17-mini-deepep/mini_deepep 2048 8 256 4
 ```
+
+`NVSHMEM_REMOTE_TRANSPORT=none` keeps these single-node examples on the local
+GPU P2P path. Do not use it for multi-node NVSHMEM runs, where a remote
+transport is required.
 
 ---
 

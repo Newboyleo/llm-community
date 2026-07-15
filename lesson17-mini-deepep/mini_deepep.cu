@@ -12,6 +12,7 @@
 //   - gather is fused into the dispatch kernel (one put per token), like DeepEP.
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include <nvshmem.h>
@@ -80,12 +81,11 @@ __global__ void dispatch_kernel(const float* __restrict__ tokens,
 }
 
 // Consumer: poll every (channel, src) ready flag for this PE; set arrived.
-__global__ void consume_kernel(const int* ready, int* arrived, int n, int nch) {
+__global__ void consume_kernel(int* ready, int* arrived, int n, int nch) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int s = 0; s < n; ++s)
         for (int c = 0; c < nch; ++c) {
-            int seq;
-            do { seq = ready[c * n + s]; } while (seq != 1);
+            nvshmem_int_wait_until(ready + c * n + s, NVSHMEM_CMP_EQ, 1);
         }
     *arrived = 1;
 }
@@ -94,12 +94,24 @@ int main(int argc, char** argv) {
     int T = 2048, E = 8, D = 256, nch = 4;
     nvshmem_init();
     int n = nvshmem_n_pes();
-    if (n < 2) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "needs >=2 PEs\n"); nvshmem_finalize(); return 1; }
+    int pe = nvshmem_my_pe();
+    if (n < 2) { if (pe == 0) std::fprintf(stderr, "needs >=2 PEs\n"); nvshmem_finalize(); return 1; }
     LAB_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
     if (argc > 4) nch = std::atoi(argv[4]);
+    if (T <= 0 || E <= 0 || D <= 0) {
+        if (pe == 0) std::fprintf(stderr, "T, E, and D must all be positive\n");
+        nvshmem_finalize();
+        return 1;
+    }
+    if (E > 1024) {
+        if (pe == 0)
+            std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
+        nvshmem_finalize();
+        return 1;
+    }
     if (E % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "E must be divisible by n\n"); nvshmem_finalize(); return 1; }
     if (T % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "T must be divisible by n\n"); nvshmem_finalize(); return 1; }
     if (D != 64 && D != 128 && D != 256) {
@@ -108,7 +120,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (nch <= 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "channels must be > 0\n"); nvshmem_finalize(); return 1; }
-    int pe = nvshmem_my_pe();
     int Tlocal = T / n;
 
     if (pe == 0)

@@ -5,6 +5,7 @@
 // The sweep() harness times each configuration and prints a table.
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include <nvshmem.h>
@@ -15,7 +16,7 @@
 
 struct Opt {
     bool putmem;     // rung 2: one putmem per token instead of D float_puts
-    bool fp8;        // rung 3: quantize to 1 byte (sketch: just halve the size we report)
+    bool fp8;        // rung 3 marker; this teaching kernel does not quantize data
     int  channels;   // rung 4
     int  batch;      // rung 1: tokens per quiet
 };
@@ -99,6 +100,17 @@ int main(int argc, char** argv) {
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
+    if (T <= 0 || E <= 0 || D <= 0) {
+        if (nvshmem_my_pe() == 0) std::fprintf(stderr, "T, E, and D must all be positive\n");
+        nvshmem_finalize();
+        return 1;
+    }
+    if (E > 1024) {
+        if (nvshmem_my_pe() == 0)
+            std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
+        nvshmem_finalize();
+        return 1;
+    }
     if (E % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "E must be divisible by n\n"); nvshmem_finalize(); return 1; }
     if (T % n != 0) { if (nvshmem_my_pe() == 0) std::fprintf(stderr, "T must be divisible by n\n"); nvshmem_finalize(); return 1; }
     if (D != 64 && D != 128 && D != 256) {
@@ -148,7 +160,7 @@ int main(int argc, char** argv) {
         nvshmem_barrier_all();
         double bytes = (double)T * D * sizeof(float);
         if (pe == 0)
-            std::printf("%-32s  %7.3f ms  %6.0f GB/s\n", name, ms,
+            std::printf("%-32s  %7.3f ms  %8.3f GB/s\n", name, ms,
                         bytes/1e9/(ms/1000.0));
         LAB_CUDA(cudaStreamDestroy(s));
     };
