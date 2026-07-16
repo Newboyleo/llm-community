@@ -13,8 +13,10 @@
 
 An SPSC ring buffer where **producer and consumer are on different GPUs**.
 Producer PE 0 pushes values that land in PE 1's symmetric buffer; consumer PE
-1 pops them. The only coordination is the head/tail counters — also in
-symmetric memory — and an `nvshmem_quiet` before the head advances.
+1 pops them. Coordination uses put-based cursor mirrors: producer puts `head`
+to PE 1, consumer puts `tail` back to PE 0, and each side waits on its local
+symmetric copy. The data put is followed by an `nvshmem_quiet` before `head`
+advances.
 
 ```
    PE 0 (producer)                          PE 1 (consumer)
@@ -23,7 +25,9 @@ symmetric memory — and an `nvshmem_quiet` before the head advances.
    │  write slot  │   (data, into PE1 HBM)  │ (symmetric)  │
    │  quiet       │                         │              │
    │  head++      │ ──────────────────────▶ │ head (symm)  │
-   └──────────────┘   (head, into PE1)      │              │
+   │              │   (head, into PE1)      │              │
+   │ tail mirror  │ ◀────────────────────── │  tail++      │
+   └──────────────┘   (tail, into PE0)      │              │
                                           pop loop:        │
                                             while(head==tail) spin
                                             read slot
@@ -65,11 +69,12 @@ router deciding which channel each token takes. Those are lessons 14–17.
 - `slots[cap]` — **symmetric**. Producer writes to `&slots[head%cap]` on the
   *consumer's* PE via `nvshmem_int_put`. (Equivalently, put to the consumer's
   copy of `slots`, same VA.)
-- `head` — **symmetric**. Producer owns it; consumer reads it locally after
-  the producer echoes updates to the consumer PE. Producer
+- `head` — **symmetric**. Producer owns the logical counter; consumer reads its
+  local PE 1 mirror after the producer puts updates there. Producer
   `nvshmem_int_put`s the new head to the consumer after a `quiet`.
-- `tail` — **symmetric**. Consumer owns it; producer reads it locally after
-  the consumer echoes updates back to the producer PE to check for full.
+- `tail` — **symmetric**. Consumer owns the logical counter; producer reads its
+  local PE 0 mirror after the consumer puts updates back to the producer PE.
+  This lesson does not remote-get `tail` from PE 1.
 
 ## The producer push (device-side)
 
@@ -77,7 +82,7 @@ router deciding which channel each token takes. Those are lessons 14–17.
 __device__ void push(SymmRing r, int val, int cons_pe) {
     for (;;) {
         int h = r.head_local;                 // my own head
-        int t = *r.tail_ptr;                  // local tail mirror
+        int t = *r.tail_ptr;                  // local PE0 tail mirror
         if (h - t < r.cap) break;             // not full
     }
     nvshmem_int_put(&r.slots[h % r.cap], &val, 1, cons_pe);  // data -> consumer
@@ -103,15 +108,16 @@ __device__ int pop(SymmRing r) {
     }
     int v = r.slots[t % r.cap];     // local read of symmetric slot
     r.tail_local = t + 1;
-    // tail is informational for the producer; put it back so producer sees not full
+    // tail is informational for the producer; put it to PE0's local mirror
     int newt = t + 1;
     nvshmem_int_put(r.tail_ptr, &newt, 1, /*producer_pe=*/...);  // or use a shared atomic
     return v;
 }
 ```
 
-(We simplify the tail echo in the actual code; the key idea is that the
-consumer reads `head` locally because the producer put it there.)
+(The key idea is symmetry of direction: consumer reads `head` locally because
+the producer put it to PE 1; producer reads `tail` locally because the consumer
+put it to PE 0.)
 
 ---
 
@@ -248,3 +254,18 @@ DeepEP     ChannelBuffer:
 When you open DeepEP's source in lesson 18, search for `nvshmem_quiet` inside
 the dispatch kernel — every occurrence is the cross-GPU analog of today's
 fence, guarding a head/batch advance. The structure is identical.
+
+
+为什么 NVSHMEM 愿意接受这种浪费？
+这是一个典型的空间换时间（space-for-time）的设计。
+它换来了几个非常重要的优势：
+统一地址模型：所有 PE 的对称对象具有一致的布局，不需要交换地址。
+零握手通信：nvshmem_put(ptr, ..., pe) 不需要事先查询远端地址。
+GPU 内直接通信：Kernel 可以直接发起 put/get，不需要 CPU 参与。
+实现简单且高性能：运行时只需根据 pe 和对象偏移计算远端地址。
+因此，NVSHMEM 更关注通信效率和编程模型，而不是把对称堆的内存利用率做到极致。
+总结
+所以你的理解基本是正确的，但可以更准确地表述为：
+是的，nvshmem_malloc 分配的是对称内存，所有参与的 GPU 都必须分配相同大小、相同布局的空间。
+是的，如果某些 GPU 永远不会使用某块对称内存，那么这部分空间确实会被浪费。
+但在多数 HPC 和分布式 AI 场景中，每个 GPU 本来就需要自己的数据区（例如本地 KV Cache、消息队列、工作缓冲区等），因此这种额外浪费通常并不大，而换来的统一地址空间和极低通信开销是非常值得的。

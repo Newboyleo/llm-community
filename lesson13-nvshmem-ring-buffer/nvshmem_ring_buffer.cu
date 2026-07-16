@@ -2,7 +2,8 @@
 //
 // Lesson 9's SPSC ring buffer, but across GPUs via NVSHMEM. PE0 (producer)
 // pushes values that land in PE1's (consumer) symmetric slots. Coordination
-// is head/tail in symmetric memory + nvshmem_quiet before head advances.
+// uses put-based cursor mirrors: producer puts head to PE1, consumer puts tail
+// back to PE0. Each side then waits on its local symmetric copy.
 
 #include <cstdio>
 #include <algorithm>
@@ -17,8 +18,8 @@
 
 struct SymmRing {
     int* slots;   // symmetric, cap ints
-    int* head;    // symmetric, owned by producer (writes), read by consumer
-    int* tail;    // symmetric, consumer echoes updates to producer, read by producer
+    int* head;    // symmetric; producer puts updates to PE1, consumer reads locally
+    int* tail;    // symmetric; consumer puts updates to PE0, producer reads locally
     int cap;
 };
 
@@ -26,10 +27,10 @@ struct SymmRing {
 __global__ void producer_kernel(SymmRing r, int count, int cons_pe) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     int head_local = 0;
-    volatile int* tail_local = r.tail;
+    volatile int* producer_tail_mirror = r.tail;
     for (int i = 0; i < count; ++i) {
-        // Consumer echoes tail into this PE's symmetric tail, so wait locally.
-        if (head_local - *tail_local >= r.cap) {
+        // This is a local PE0 wait. The consumer advances it with a remote put.
+        if (head_local - *producer_tail_mirror >= r.cap) {
             nvshmem_int_wait_until(r.tail, NVSHMEM_CMP_GT, head_local - r.cap);
         }
 
@@ -54,7 +55,7 @@ __global__ void consumer_kernel(SymmRing r, int* out, int count, int prod_pe) {
         int slot = tail_local % r.cap;
         out[i] = slots_local[slot];   // local read of symmetric slot
         ++tail_local;
-        // echo tail back to producer so it can see "not full"
+        // Put tail to PE0's mirror; producer never remote-gets PE1's tail.
         nvshmem_int_put(r.tail, &tail_local, 1, prod_pe);
         nvshmem_quiet();
     }
