@@ -292,3 +292,505 @@ When you read DeepEP's `intranode_dispatch` kernel, every
 `nvshmem_float_put` / `nvshmem_putmem` you see is exactly today's primitive.
 The rest of DeepEP is *scheduling* these puts (lessons 13–17) and *quantizing*
 them (lesson 19).
+
+
+这是一个非常好的问题。**很多人以为 NVSHMEM 比 P2P 快是因为带宽更高，其实不是。**
+
+对于两张通过 NVLink 连接的 GPU 来说：
+
+* **P2P (`cudaMemcpyPeerAsync`)**
+* **NVSHMEM (`nvshmem_put/get`)**
+
+底层走的都是 **NVLink（或者 PCIe/RDMA）**。
+
+因此：
+
+> **纯数据传输带宽和链路延迟几乎是一样的。**
+
+NVSHMEM 真正减少的不是**传输时间**，而是**控制和同步开销**。
+
+---
+
+## 先看传统 P2P
+
+假设 GPU0 算完数据，要发送给 GPU1。
+
+流程通常是：
+
+```text
+GPU0 kernel
+      │
+      ▼
+CPU 等 kernel 结束
+      │
+      ▼
+cudaMemcpyPeerAsync()
+      │
+      ▼
+DMA Engine 开始搬运
+      │
+      ▼
+CPU/Event 通知 GPU1
+      │
+      ▼
+GPU1 kernel 开始计算
+```
+
+这里至少有几个额外步骤：
+
+```
+GPU → CPU
+CPU 发起 memcpy
+CPU 设置 DMA
+CPU 发 Event
+GPU1 等 Event
+```
+
+虽然每一步只有几微秒，但是如果：
+
+```
+每个 token
+每层
+每个专家
+```
+
+都来一次，就会累积。
+
+例如：
+
+```
+100 层
+×
+8 GPU
+×
+每层一次 memcpy
+
+≈ 几百次 Host API
+```
+
+CPU 就变成瓶颈。
+
+---
+
+## NVSHMEM
+
+NVSHMEM 可以写成
+
+```cpp
+__global__ void kernel(...) {
+
+    compute();
+
+    nvshmem_put(...);
+
+    compute_next();
+}
+```
+
+整个流程：
+
+```text
+GPU0 kernel
+      │
+      ▼
+compute
+      │
+      ▼
+nvshmem_put()
+      │
+      ▼
+NVLink
+      │
+      ▼
+GPU1 内存
+```
+
+CPU 完全没有参与。
+
+少掉了：
+
+```
+kernel launch
+↓
+
+cudaMemcpyPeerAsync
+
+↓
+
+CPU 调度
+
+↓
+
+Event
+
+↓
+
+再次 launch kernel
+```
+
+---
+
+## 一个简单的时间线
+
+### P2P
+
+```
+GPU0
+
+compute
+========
+
+CPU
+
+        launch memcpy
+-----------------------
+
+DMA
+
+              =========
+
+GPU1
+
+                       wait
+-----------------------
+                       compute
+                       =======
+```
+
+GPU1 必须等 CPU。
+
+---
+
+### NVSHMEM
+
+```
+GPU0 kernel
+
+compute
+========
+
+put
+----
+
+继续 compute
+===========
+```
+
+GPU0 自己就在 kernel 内完成通信。
+
+GPU1 甚至可以：
+
+```cpp
+while(flag==0)
+    ;
+
+继续计算
+```
+
+或者：
+
+```cpp
+nvshmem_wait_until(...)
+```
+
+等待数据。
+
+整个控制流都在 GPU。
+
+---
+
+# Kernel Launch 数量减少
+
+例如一个流水线。
+
+P2P：
+
+```
+Kernel1
+
+↓
+
+cudaMemcpyPeer
+
+↓
+
+Kernel2
+
+↓
+
+cudaMemcpyPeer
+
+↓
+
+Kernel3
+```
+
+要 Launch：
+
+```
+Kernel
+Memcpy
+Kernel
+Memcpy
+Kernel
+```
+
+而 NVSHMEM：
+
+```
+Kernel
+
+compute
+
+↓
+
+put
+
+↓
+
+compute
+
+↓
+
+put
+
+↓
+
+compute
+```
+
+整个就是
+
+```
+一个 Kernel
+```
+
+Launch overhead 可以减少很多。
+
+Kernel Launch 一般：
+
+```
+3~10 us
+```
+
+如果：
+
+```
+1000 次通信
+```
+
+就已经：
+
+```
+3~10 ms
+```
+
+---
+
+# GPU 不需要 Host Wakeup
+
+传统 CUDA：
+
+```
+GPU
+
+完成
+
+↓
+
+CPU 收到 Event
+
+↓
+
+CPU Launch 下一步
+```
+
+NVSHMEM：
+
+```
+GPU
+
+完成
+
+↓
+
+GPU 自己继续
+```
+
+省去了：
+
+```
+GPU→CPU
+
+CPU→GPU
+```
+
+来回通知。
+
+---
+
+# 对 MoE 的影响最大
+
+例如 DeepEP dispatch。
+
+传统：
+
+```
+Expert0
+
+↓
+
+cudaMemcpyPeer
+
+↓
+
+Expert1
+
+↓
+
+cudaMemcpyPeer
+
+↓
+
+Expert2
+```
+
+GPU 一直停下来等 CPU。
+
+NVSHMEM：
+
+```
+Expert0
+
+↓
+
+put()
+
+↓
+
+继续处理下一批 token
+```
+
+GPU 不停。
+
+---
+
+# KV Cache Transfer
+
+例如 Decode GPU：
+
+传统：
+
+```
+CPU
+
+↓
+
+cudaMemcpyPeerAsync
+
+↓
+
+GPU 收到 KV
+
+↓
+
+Decode
+```
+
+NVSHMEM：
+
+```
+Prefill GPU
+
+↓
+
+put(KV)
+
+↓
+
+Decode GPU
+
+wait_until()
+
+↓
+
+继续 Decode
+```
+
+Host 完全退出。
+
+Mooncake、DeepEP 基本都是这种模式。
+
+---
+
+# 真正节省的是哪些时间？
+
+如果把一次通信拆开：
+
+```
+总耗时
+
+=
+
+启动开销
++
+同步开销
++
+真正的数据传输
+```
+
+其中：
+
+```
+启动
+
+Kernel Launch
+API 调用
+CPU 调度
+```
+
+以及
+
+```
+同步
+
+cudaEvent
+cudaStreamWaitEvent
+Host Synchronize
+```
+
+NVSHMEM 基本都可以省掉。
+
+但是：
+
+```
+NVLink 上传输 4 MB
+
+需要多少时间？
+```
+
+这个：
+
+```
+P2P
+
+≈ NVSHMEM
+```
+
+因为底层还是同一条 NVLink。
+
+---
+
+## 总结
+
+NVSHMEM 并不是让 **NVLink 更快**，而是让 **GPU 能自己发起通信和同步**。相比传统 P2P，它主要减少的是：
+
+| 开销                             | `cudaMemcpyPeerAsync` | NVSHMEM          |
+| ------------------------------ | --------------------- | ---------------- |
+| CPU 调用 `cudaMemcpyPeerAsync`   | ❌ 需要                  | ✅ 不需要            |
+| CPU 发起 DMA 传输                  | ❌ 需要                  | ✅ GPU 内核直接发起     |
+| 多次 Kernel Launch               | ❌ 通常需要                | ✅ 可合并到同一个 Kernel |
+| Host 事件调度 (`cudaEvent`、CPU 唤醒) | ❌ 常见                  | ✅ 大幅减少           |
+| 数据传输时间（NVLink/PCIe）            | ≈ 相同                  | ≈ 相同             |
+
+因此，**对于一次大块数据（例如 1 GB）的复制，NVSHMEM 不一定比 P2P 更快**；真正的优势出现在**大量小消息、频繁通信、细粒度流水线和 GPU 间协同计算**（如 MoE、KV Cache、Pipeline Parallel）中，因为它显著降低了 CPU 参与和同步带来的累计开销。
