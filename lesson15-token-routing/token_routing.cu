@@ -5,11 +5,27 @@
 // the dispatch plan that lessons 16/17 consume across GPUs.
 
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <vector>
 
 #include "checks.hpp"
 #include "print.hpp"
+
+static uint32_t mix32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+static float rand_signed(uint32_t seed, uint32_t i) {
+    uint32_t x = mix32(seed ^ (i + 0x9e3779b9U));
+    float u01 = (float)(x >> 8) * (1.0f / 16777216.0f);
+    return 2.0f * u01 - 1.0f;
+}
 
 // logits[t,e] = sum_d x[t,d] * W[d,e]
 __global__ void gate_kernel(const float* x, const float* W, float* logits,
@@ -61,10 +77,12 @@ __global__ void prefix_kernel(const int* count, int* offsets, int n) {
 
 int main(int argc, char** argv) {
     int T = 1024, E = 8, D = 256, n = 4;
+    uint32_t seed = 1234;
     if (argc > 1) T = std::atoi(argv[1]);
     if (argc > 2) E = std::atoi(argv[2]);
     if (argc > 3) D = std::atoi(argv[3]);
     if (argc > 4) n = std::atoi(argv[4]);
+    if (argc > 5) seed = (uint32_t)std::strtoul(argv[5], nullptr, 10);
     if (T <= 0 || E <= 0 || D <= 0 || n <= 0) {
         std::fprintf(stderr, "T, E, D, and n must all be positive\n");
         return 1;
@@ -73,17 +91,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
         return 1;
     }
+    if (n > E) {
+        std::fprintf(stderr, "n must be <= E (need >=1 expert per GPU; got E/n=%d)\n", E / n);
+        return 1;
+    }
     if (E % n != 0) { std::fprintf(stderr, "E must be divisible by n\n"); return 1; }
 
     std::printf("==== lesson 15: token routing ====\n");
-    std::printf("T=%d tokens, E=%d experts, D=%d hidden, n=%d GPUs (E/n=%d experts/GPU)\n\n",
-                T, E, D, n, E / n);
+    std::printf("T=%d tokens, E=%d experts, D=%d hidden, n=%d GPUs (E/n=%d experts/GPU), seed=%u\n\n",
+                T, E, D, n, E / n, seed);
 
-    // random-ish gate weights and tokens (deterministic, not uniform, for a
-    // visible but non-trivial routing)
+    // Deterministic pseudo-random gate weights and tokens. Avoid short-period
+    // low-bit patterns: with D=256 those make every token identical.
     std::vector<float> h_x(T * D), h_W(D * E);
-    for (int i = 0; i < T * D; ++i) h_x[i] = (float)((i * 1103515245 + 12345) & 0xff) / 256.f;
-    for (int i = 0; i < D * E; ++i) h_W[i] = (float)((i * 214013 + 2531011) & 0xff) / 256.f - 0.5f;
+    for (int i = 0; i < T * D; ++i) h_x[i] = rand_signed(seed, (uint32_t)i);
+    for (int i = 0; i < D * E; ++i) h_W[i] = rand_signed(seed ^ 0xa5a5a5a5U, (uint32_t)i);
 
     float *d_x, *d_W, *d_logits;
     int *d_assign, *d_count, *d_offsets;

@@ -138,7 +138,7 @@ drive its dispatch indexing.
 Key lines (count, the heart of it):
 
 ```c
-__global__ void count_kernel(const int* assign, int* count, int T, int n) {
+__global__ void count_kernel(const int* assign, int* count, int T, int n, int E) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= T) return;
     int e = assign[t];
@@ -165,8 +165,8 @@ output into the cross-GPU dispatch in lesson 16.)
 
 ```bash
 ./build/lesson15-token-routing/token_routing
-# T E D
-./build/lesson15-token-routing/token_routing 1024 8 256
+# T E D n seed
+./build/lesson15-token-routing/token_routing 1024 8 256 4 1234
 ```
 
 ---
@@ -175,23 +175,23 @@ output into the cross-GPU dispatch in lesson 16.)
 
 ```
 ==== lesson 15: token routing ====
-T=1024 tokens, E=8 experts, D=256 hidden, n=4 GPUs (E/n=2 experts/GPU)
+T=1024 tokens, E=8 experts, D=256 hidden, n=4 GPUs (E/n=2 experts/GPU), seed=1234
 
-assign[0..7] = [3, 0, 7, 1, 4, 2, 6, 5, ...]
+assign[0..7] = [5, 5, 3, 3, 6, 6, 4, 4, ...]
 
 count[src][dst]  (rows=src GPU, cols=dst GPU):
        dst0  dst1  dst2  dst3
-src0    130   121   135   100
-src1    118   140   107   121
-src2    127   113   128   118
-src3    105   126   130   117
+src0     59    72    72    53
+src1     58    69    68    61
+src2     55    68    78    55
+src3     55    81    63    57
 
 offsets[src][dst] = prefix sum of count[*][dst] over src:
        dst0  dst1  dst2  dst3
 src0      0     0     0     0
-src1    130   121   135   100
-src2    248   261   242   221
-src3    375   374   370   339
+src1     59    72    72    53
+src2    117   141   140   114
+src3    172   209   218   169
 ```
 
 The count matrix is roughly uniform here (random gate weights → uniform
