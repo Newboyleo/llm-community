@@ -72,6 +72,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "E must be <= 1024 because gate_kernel uses one block with E threads\n");
         return 1;
     }
+    if (D < E) {
+        std::fprintf(stderr, "D must be >= E for the balanced synthetic routing demo\n");
+        return 1;
+    }
     if (E % n != 0) { std::fprintf(stderr, "E must be divisible by n\n"); return 1; }
     if (T % n != 0) { std::fprintf(stderr, "T must be divisible by n\n"); return 1; }
     int Tlocal = T / n;
@@ -95,11 +99,14 @@ int main(int argc, char** argv) {
         LAB_CUDA(cudaMalloc(&d_recvbuf[r], (size_t)T * D * sizeof(float)));
     }
 
-    std::vector<float> h_W(D * E);
-    for (int i = 0; i < D * E; ++i) h_W[i] = (float)((i * 214013 + 2531011) & 0xff) / 256.f - 0.5f;
+    std::vector<float> h_W(D * E, 0.f);
+    for (int e = 0; e < E; ++e) h_W[e * E + e] = 1.f;
     for (int r = 0; r < n; ++r) {
-        std::vector<float> ht(Tlocal * D);
-        for (int i = 0; i < Tlocal * D; ++i) ht[i] = (float)(r * 1000 + (i & 0xff));
+        std::vector<float> ht(Tlocal * D, 0.f);
+        for (int t = 0; t < Tlocal; ++t) {
+            int expert = (r * Tlocal + t) % E;
+            ht[t * D + expert] = 1.f;
+        }
         LAB_CUDA(cudaSetDevice(r));
         LAB_CUDA(cudaMemcpy(d_tokens[r], ht.data(), ht.size() * sizeof(float), cudaMemcpyHostToDevice));
         LAB_CUDA(cudaMemcpy(d_W[r], h_W.data(), h_W.size() * sizeof(float), cudaMemcpyHostToDevice));
