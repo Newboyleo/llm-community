@@ -170,6 +170,9 @@ CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
 CUDA_VISIBLE_DEVICES=0,1,2,3 NVSHMEM_REMOTE_TRANSPORT=none \
     /usr/bin/nvshmem_12/nvshmrun -np 4 \
     ./build/lesson17-mini-deepep/mini_deepep 2048 8 256 4
+
+./build/lesson17-mini-deepep/mini_deepep 2048 8 256 low-latency fp8
+./build/lesson17-mini-deepep/mini_deepep 65536 8 256 normal fp8 8 32 8 96
 ```
 
 `NVSHMEM_REMOTE_TRANSPORT=none` keeps these single-node examples on the local
