@@ -20,14 +20,19 @@ elseif(DEFINED NVSHMEM_DIR)
     endif()
 endif()
 if(_ok)
-    add_executable(mini_deepep mini_deepep.cu)
-    target_link_libraries(mini_deepep PRIVATE lab_common ${_libs})
-    if(DEFINED NVSHMEM_INCLUDE_DIR)
-        target_include_directories(mini_deepep PRIVATE ${NVSHMEM_INCLUDE_DIR})
-    endif()
-    set_target_properties(mini_deepep PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lesson17-mini-deepep)
+    function(add_lesson17_nvshmem_target target source)
+        add_executable(${target} ${source})
+        target_link_libraries(${target} PRIVATE lab_common ${_libs})
+        if(DEFINED NVSHMEM_INCLUDE_DIR)
+            target_include_directories(${target} PRIVATE ${NVSHMEM_INCLUDE_DIR})
+        endif()
+        set_target_properties(${target} PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lesson17-mini-deepep)
+    endfunction()
+
+    add_lesson17_nvshmem_target(mini_deepep mini_deepep.cu)
+    add_lesson17_nvshmem_target(mini_deepep_optimized mini_deepep_optimized.cu)
     message(STATUS "  lesson17-mini-deepep: enabled")
 else()
     message(STATUS "  lesson17-mini-deepep: SKIPPED (NVSHMEM not found)")
