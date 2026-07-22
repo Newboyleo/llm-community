@@ -156,6 +156,7 @@ the diagrams above.)
 ```bash
 cmake -S . -B build -DBUILD_NVSHMEM_LESSONS=ON -DNVSHMEM_DIR=/path/to/nvshmem
 cmake --build build -j --target mini_deepep
+cmake --build build -j --target mini_deepep_optimized
 ```
 
 ---
@@ -171,8 +172,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NVSHMEM_REMOTE_TRANSPORT=none \
     /usr/bin/nvshmem_12/nvshmrun -np 4 \
     ./build/lesson17-mini-deepep/mini_deepep 2048 8 256 4
 
-./build/lesson17-mini-deepep/mini_deepep 2048 8 256 low-latency fp8
-./build/lesson17-mini-deepep/mini_deepep 65536 8 256 normal fp8 8 32 8 96
+CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 2 \
+    ./build/lesson17-mini-deepep/mini_deepep_optimized 2048 8 256 low-latency fp8
+CUDA_VISIBLE_DEVICES=0,1,2,3 NVSHMEM_REMOTE_TRANSPORT=none \
+    /usr/bin/nvshmem_12/nvshmrun -np 4 \
+    ./build/lesson17-mini-deepep/mini_deepep_optimized 65536 8 256 normal fp8 8 32 8 96
 ```
 
 `NVSHMEM_REMOTE_TRANSPORT=none` keeps these single-node examples on the local

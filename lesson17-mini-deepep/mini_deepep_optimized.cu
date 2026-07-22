@@ -101,6 +101,19 @@ static size_t dispatch_smem_bytes(int D, int chunk_tokens, bool use_fp8) {
     return bytes;
 }
 
+static uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static float hash_float_signed(uint32_t x) {
+    return ((hash_u32(x) & 0x00ffffffu) / 8388608.0f) - 1.0f;
+}
+
 static void print_usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s [T] [E] [D] [mode|channels] [fp8] [channels] [chunk] "
@@ -335,10 +348,8 @@ dispatch_normal_kernel(const float* __restrict__ tokens,
 }
 
 __device__ static inline void wait_ready_flag(int* ready, int idx, int poll_sleep) {
-    volatile int* r = reinterpret_cast<volatile int*>(ready);
-    while (r[idx] != 1) {
-        if (poll_sleep > 0) __nanosleep((unsigned int)poll_sleep);
-    }
+    (void)poll_sleep;
+    nvshmem_int_wait_until(ready + idx, NVSHMEM_CMP_EQ, 1);
 }
 
 template <int D, bool UseFp8>
@@ -432,7 +443,19 @@ int main(int argc, char** argv) {
     nvshmem_init();
     int n = nvshmem_n_pes();
     int pe = nvshmem_my_pe();
-    if (n < 2) { if (pe == 0) std::fprintf(stderr, "needs >=2 PEs\n"); nvshmem_finalize(); return 1; }
+    if (n < 2) {
+        if (pe == 0) {
+            std::fprintf(stderr,
+                         "needs >=2 PEs, but this run started %d PE.\n"
+                         "Launch with NVSHMEM, for example:\n"
+                         "  CUDA_VISIBLE_DEVICES=0,1 NVSHMEM_REMOTE_TRANSPORT=none "
+                         "/usr/bin/nvshmem_12/nvshmrun -np 2 %s "
+                         "2048 8 256 low-latency fp8\n",
+                         n, argv[0]);
+        }
+        nvshmem_finalize();
+        return 1;
+    }
     LAB_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
 
     cudaDeviceProp prop{};
@@ -551,10 +574,24 @@ int main(int argc, char** argv) {
 
     {
         std::vector<float> ht((size_t)Tlocal * D);
-        for (int i = 0; i < Tlocal * D; ++i) ht[i] = (float)(pe * 1000 + (i & 0xff));
+        for (int t = 0; t < Tlocal; ++t) {
+            for (int d = 0; d < D; ++d) {
+                ht[(size_t)t * D + d] =
+                    hash_float_signed((uint32_t)(pe * 1315423911u) ^
+                                      (uint32_t)(t * 2654435761u) ^
+                                      (uint32_t)(d * 2246822519u));
+            }
+        }
         LAB_CUDA(cudaMemcpy(tokens, ht.data(), ht.size() * sizeof(float), cudaMemcpyHostToDevice));
         std::vector<float> hw((size_t)D * E);
-        for (int i = 0; i < D * E; ++i) hw[i] = (float)((i * 214013 + 2531011) & 0xff) / 256.f - 0.5f;
+        for (int d = 0; d < D; ++d) {
+            for (int e = 0; e < E; ++e) {
+                hw[(size_t)d * E + e] =
+                    hash_float_signed(0x9e3779b9u ^
+                                      (uint32_t)(d * 3266489917u) ^
+                                      (uint32_t)(e * 668265263u));
+            }
+        }
         LAB_CUDA(cudaMemcpy(W, hw.data(), hw.size() * sizeof(float), cudaMemcpyHostToDevice));
         LAB_CUDA(cudaMemset(count_row, 0, n * sizeof(int)));
         LAB_CUDA(cudaMemset(recvbuf, 0, (size_t)n * Tlocal * D * sizeof(float)));
@@ -593,18 +630,8 @@ int main(int argc, char** argv) {
     LAB_CUDA(cudaStreamCreate(&dispatch_stream));
     LAB_CUDA(cudaStreamCreate(&expert_stream));
 
-    // Start the expert-side stream first; it polls ready flags while dispatch runs.
-    dim3 expert_grid(cfg.expert_sms);
-    if (cfg.use_fp8) {
-        if (D == 256)      launch_expert<256, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-        else if (D == 128) launch_expert<128, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-        else               launch_expert<64, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-    } else {
-        if (D == 256)      launch_expert<256, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-        else if (D == 128) launch_expert<128, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-        else               launch_expert<64, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
-    }
-
+    // Submit dispatch before the persistent expert wait kernel so ready flags
+    // are produced even on runtimes that do not reserve SMs between streams.
     dim3 dispatch_grid(dispatch_blocks);
     if (cfg.use_fp8) {
         if (D == 256)      launch_dispatch<256, true>(cfg.mode, dispatch_grid, smem, dispatch_stream, tokens, assign, recvbuf, recvbuf8, recv_scale, ready, Tlocal, n, E, cfg.channels, pe, cfg.chunk_tokens);
@@ -615,6 +642,19 @@ int main(int argc, char** argv) {
         else if (D == 128) launch_dispatch<128, false>(cfg.mode, dispatch_grid, smem, dispatch_stream, tokens, assign, recvbuf, recvbuf8, recv_scale, ready, Tlocal, n, E, cfg.channels, pe, cfg.chunk_tokens);
         else               launch_dispatch<64, false>(cfg.mode, dispatch_grid, smem, dispatch_stream, tokens, assign, recvbuf, recvbuf8, recv_scale, ready, Tlocal, n, E, cfg.channels, pe, cfg.chunk_tokens);
     }
+    LAB_CUDA(cudaGetLastError());
+
+    dim3 expert_grid(cfg.expert_sms);
+    if (cfg.use_fp8) {
+        if (D == 256)      launch_expert<256, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+        else if (D == 128) launch_expert<128, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+        else               launch_expert<64, true>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+    } else {
+        if (D == 256)      launch_expert<256, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+        else if (D == 128) launch_expert<128, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+        else               launch_expert<64, false>(expert_grid, expert_stream, recvbuf, recvbuf8, recv_scale, expert_out, ready, Tlocal, n, cfg.channels, cfg.poll_sleep, cfg.expert_iters);
+    }
+    LAB_CUDA(cudaGetLastError());
 
     LAB_CUDA(cudaStreamSynchronize(dispatch_stream));
     LAB_CUDA(cudaStreamSynchronize(expert_stream));
